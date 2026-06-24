@@ -1,0 +1,8 @@
+# 阶段1 仅需 FastAPI 骨架
+fastapi
+uvicorn[standard]
+
+# 阶段2 取消注释（建议用独立的 Python 3.11/3.12 venv —— torch 等暂无 3.14 wheel）
+# faster-whisper
+# whisperx
+# google-genai

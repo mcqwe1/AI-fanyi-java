@@ -1,0 +1,17 @@
+# 数据与密钥（不进版本库）
+data/
+.env
+*.log
+
+# 构建产物
+backend/target/
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+.idea/
+.vscode/
+
+# 测试产物
+test/*.wav
+test/*.mp4

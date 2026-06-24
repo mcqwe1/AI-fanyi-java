@@ -1,0 +1,55 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: aifanyi-backend
+  datasource:
+    url: jdbc:mysql://localhost:3306/aifanyi?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:aifanyi123}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  servlet:
+    multipart:
+      max-file-size: 2GB
+      max-request-size: 2GB
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# ---- 应用自定义配置 ----
+aifanyi:
+  jwt:
+    # 生产务必用环境变量覆盖；至少 32 字节
+    secret: ${AIFANYI_JWT_SECRET:dev-only-secret-change-me-please-32bytes-minimum-0123456789}
+    expire-minutes: 1440
+  storage:
+    # 视频/音频/字幕等文件存储根目录
+    root: ${AIFANYI_STORAGE_ROOT:D:/aifanyi/data}
+  ffmpeg:
+    path: ${FFMPEG_PATH:ffmpeg}
+  asr:
+    groq:
+      base-url: ${GROQ_BASE_URL:https://api.groq.com/openai/v1}
+      api-key: ${GROQ_API_KEY:}
+      model: ${GROQ_ASR_MODEL:whisper-large-v3}
+  llm:
+    base-url: ${LLM_BASE_URL:https://api.openai.com/v1}
+    api-key: ${LLM_API_KEY:}
+    model: ${LLM_MODEL:gpt-4o-mini}
+
+logging:
+  level:
+    com.aifanyi: debug

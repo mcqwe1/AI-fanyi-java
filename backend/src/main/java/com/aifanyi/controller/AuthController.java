@@ -1,0 +1,48 @@
+package com.aifanyi.controller;
+
+import com.aifanyi.common.R;
+import com.aifanyi.controller.dto.AuthDtos.LoginRequest;
+import com.aifanyi.controller.dto.AuthDtos.LoginResponse;
+import com.aifanyi.controller.dto.AuthDtos.RegisterRequest;
+import com.aifanyi.controller.dto.SettingsDtos.ChangePasswordReq;
+import com.aifanyi.security.AuthUser;
+import com.aifanyi.security.SecurityUtils;
+import com.aifanyi.service.AuthService;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/auth")
+@RequiredArgsConstructor
+public class AuthController {
+
+    private final AuthService authService;
+
+    @PostMapping("/register")
+    public R<LoginResponse> register(@Valid @RequestBody RegisterRequest req) {
+        return R.ok(authService.register(req));
+    }
+
+    @PostMapping("/login")
+    public R<LoginResponse> login(@Valid @RequestBody LoginRequest req) {
+        return R.ok(authService.login(req));
+    }
+
+    @PostMapping("/change-password")
+    public R<Void> changePassword(@RequestBody ChangePasswordReq req) {
+        authService.changePassword(SecurityUtils.currentUserId(), req.oldPassword(), req.newPassword());
+        return R.ok();
+    }
+
+    @GetMapping("/me")
+    public R<Map<String, Object>> me() {
+        AuthUser u = SecurityUtils.current();
+        if (u == null) {
+            return R.fail(401, "未登录");
+        }
+        return R.ok(Map.of("userId", u.userId(), "username", u.username()));
+    }
+}
