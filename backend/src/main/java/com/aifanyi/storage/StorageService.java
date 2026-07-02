@@ -18,4 +18,7 @@ public interface StorageService {
 
     /** 在任务目录下解析一个文件名为绝对路径 */
     Path resolve(Long taskId, String filename);
+
+    /** 递归删除某任务的整个工作目录（含视频/音频/字幕等）。目录不存在时静默返回。 */
+    void deleteTaskDir(Long taskId);
 }

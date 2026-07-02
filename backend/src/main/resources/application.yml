@@ -1,5 +1,8 @@
 server:
   port: 8080
+  tomcat:
+    # 拒收超大请求体时不直接 RST 连接（否则前端只看到 ERR_CONNECTION_RESET）
+    max-swallow-size: -1
 
 spring:
   application:
@@ -15,8 +18,12 @@ spring:
       port: ${REDIS_PORT:6379}
   servlet:
     multipart:
-      max-file-size: 2GB
-      max-request-size: 2GB
+      # -1 = 不限大小（视频可能很大；真正约束是磁盘空间）
+      max-file-size: -1
+      max-request-size: -1
+      # 临时缓存目录放到与存储同盘（默认 D:），避免默认系统临时盘(C:)空间不足/跨盘拷贝；
+      # 同盘时 transferTo 退化为秒级 rename，而非再拷一遍整文件。
+      location: ${AIFANYI_STORAGE_ROOT:D:/aifanyi/data}/.uploadtmp
 
 mybatis-plus:
   configuration:
@@ -43,12 +50,17 @@ aifanyi:
   asr:
     groq:
       base-url: ${GROQ_BASE_URL:https://api.groq.com/openai/v1}
-      api-key: ${GROQ_API_KEY:}
       model: ${GROQ_ASR_MODEL:whisper-large-v3}
+      # 超过此字节数自动分块转写（20MB，安全低于 Groq 免费档 25MB；付费档可调高）
+      max-chunk-bytes: ${GROQ_MAX_CHUNK_BYTES:20971520}
+    local:
+      base-url: ${AI_SERVICE_URL:http://localhost:8001}
+  # 密钥/Base URL/模型一律存在每用户 user_setting（设置页），不再从环境变量读取
   llm:
-    base-url: ${LLM_BASE_URL:https://api.openai.com/v1}
-    api-key: ${LLM_API_KEY:}
-    model: ${LLM_MODEL:gpt-4o-mini}
+    # 推理模型关思维链提速；批大小越大请求数越少；并发越高墙钟越快
+    disable-thinking: ${LLM_DISABLE_THINKING:true}
+    batch-size: ${LLM_BATCH_SIZE:40}
+    concurrency: ${LLM_CONCURRENCY:8}
 
 logging:
   level:

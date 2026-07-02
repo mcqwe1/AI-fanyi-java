@@ -58,6 +58,20 @@ public class FfmpegService {
         return outAudio;
     }
 
+    /** 从音频切出 [startSec, startSec+durSec) 一段，重编码为 16kHz 单声道 mp3（用于超大文件分块转写）。 */
+    public Path cutAudio(Path inAudio, Path outAudio, double startSec, double durSec) {
+        List<String> cmd = List.of(
+                ffmpeg, "-y",
+                "-ss", String.format(java.util.Locale.ROOT, "%.3f", Math.max(0, startSec)),
+                "-t", String.format(java.util.Locale.ROOT, "%.3f", durSec),
+                "-i", inAudio.toString(),
+                "-ac", "1", "-ar", "16000", "-b:a", "64k",
+                outAudio.toString()
+        );
+        run(cmd, null, 30, TimeUnit.MINUTES, null);
+        return outAudio;
+    }
+
     /** 探测视频分辨率，返回 [width, height]，失败回退 1280x720。 */
     public int[] probeResolution(Path video) {
         List<String> cmd = List.of(
@@ -89,6 +103,36 @@ public class FfmpegService {
         } catch (Exception e) {
             return 0;
         }
+    }
+
+    /**
+     * 用 silencedetect 检测静音区间，返回 [startMs, endMs] 列表。
+     * 用于丢弃 Whisper 在静音处的幻觉字幕。
+     *
+     * @param noiseDb   静音判定阈值（如 -50 表示 -50dB；越低越保守、只判真静音）
+     * @param minDurSec 最短静音时长（秒）
+     */
+    public List<long[]> detectSilenceMs(Path audio, int noiseDb, double minDurSec) {
+        List<String> cmd = List.of(
+                ffmpeg, "-i", audio.toString(),
+                "-af", "silencedetect=noise=" + noiseDb + "dB:d=" + minDurSec,
+                "-f", "null", "-"
+        );
+        String out = runCapture(cmd, 30, TimeUnit.MINUTES);
+        List<Double> starts = new ArrayList<>();
+        List<Double> ends = new ArrayList<>();
+        Matcher ms = Pattern.compile("silence_start:\\s*([0-9.]+)").matcher(out);
+        while (ms.find()) starts.add(Double.parseDouble(ms.group(1)));
+        Matcher me = Pattern.compile("silence_end:\\s*([0-9.]+)").matcher(out);
+        while (me.find()) ends.add(Double.parseDouble(me.group(1)));
+
+        List<long[]> intervals = new ArrayList<>();
+        for (int i = 0; i < starts.size(); i++) {
+            long s = Math.round(starts.get(i) * 1000);
+            long e = (i < ends.size()) ? Math.round(ends.get(i) * 1000) : Long.MAX_VALUE;
+            intervals.add(new long[]{s, e});
+        }
+        return intervals;
     }
 
     /**

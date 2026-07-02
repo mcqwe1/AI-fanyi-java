@@ -15,3 +15,14 @@ frontend/dist/
 # 测试产物
 test/*.wav
 test/*.mp4
+
+ 
+# Python
+ai-service/.venv/
+*.pyc
+__pycache__/
+
+# 测试文件
+test/*.wav
+test/*.mp4
+ 

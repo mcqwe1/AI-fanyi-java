@@ -38,25 +38,30 @@ public class AifanyiProperties {
     @Data
     public static class Asr {
         private Groq groq = new Groq();
+        private Local local = new Local();
 
         @Data
         public static class Groq {
             private String baseUrl;
-            private String apiKey;
             private String model;
+            /** 单文件上传字节上限，超过则自动分块转写。默认 20MB，安全低于 Groq 免费档 25MB。 */
+            private long maxChunkBytes = 20L * 1024 * 1024;
+        }
+
+        @Data
+        public static class Local {
+            /** 本地 ai-service（faster-whisper）地址 */
+            private String baseUrl = "http://localhost:8001";
         }
     }
 
     @Data
     public static class Llm {
-        private String baseUrl;
-        private String apiKey;
-        private String model;
         /** 推理模型（如 deepseek-v4-flash）关闭思维链以提速；非推理模型设 false 不影响 */
         private boolean disableThinking = true;
-        /** 每批翻译行数 */
-        private int batchSize = 20;
+        /** 每批翻译行数（越大请求数越少；index 对齐保证大批次也能精确回填） */
+        private int batchSize = 40;
         /** 并发批次数 */
-        private int concurrency = 4;
+        private int concurrency = 8;
     }
 }

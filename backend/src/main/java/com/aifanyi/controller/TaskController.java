@@ -3,6 +3,7 @@ package com.aifanyi.controller;
 import com.aifanyi.common.BizException;
 import com.aifanyi.common.R;
 import com.aifanyi.controller.dto.TaskDtos.CreateTaskResp;
+import com.aifanyi.controller.dto.TaskDtos.RetryReq;
 import com.aifanyi.controller.dto.TaskDtos.SubtitleVO;
 import com.aifanyi.controller.dto.TaskDtos.TaskVO;
 import com.aifanyi.domain.SubtitleStyle;
@@ -42,6 +43,7 @@ public class TaskController {
     public R<CreateTaskResp> create(
             @RequestPart("file") MultipartFile file,
             @RequestParam(defaultValue = "NORMAL") String mode,
+            @RequestParam(required = false) Long projectId,
             @RequestParam(defaultValue = "auto") String sourceLang,
             @RequestParam(defaultValue = "中文") String targetLang,
             @RequestParam(defaultValue = "groq") String asrProvider,
@@ -49,7 +51,7 @@ public class TaskController {
             @RequestParam(defaultValue = "false") boolean burnSubtitle,
             @RequestParam(defaultValue = "false") boolean bilingual) {
         Long uid = SecurityUtils.currentUserId();
-        Long taskId = taskService.createAndStart(file, uid, mode, sourceLang, targetLang,
+        Long taskId = taskService.createAndStart(file, uid, mode, projectId, sourceLang, targetLang,
                 asrProvider, llmModel, burnSubtitle, bilingual);
         return R.ok(new CreateTaskResp(taskId));
     }
@@ -65,6 +67,22 @@ public class TaskController {
     public R<TaskVO> detail(@PathVariable Long id) {
         Long uid = SecurityUtils.currentUserId();
         return R.ok(toVO(taskService.getOwned(id, uid)));
+    }
+
+    /** 删除任务（含字幕记录与磁盘文件）。 */
+    @DeleteMapping("/{id}")
+    public R<Void> delete(@PathVariable Long id) {
+        Long uid = SecurityUtils.currentUserId();
+        taskService.delete(id, uid);
+        return R.ok();
+    }
+
+    /** 复用已上传视频重跑流水线（可选覆盖 ASR/语言/模型），不必重新上传。 */
+    @PostMapping("/{id}/retry")
+    public R<Void> retry(@PathVariable Long id, @RequestBody(required = false) RetryReq req) {
+        Long uid = SecurityUtils.currentUserId();
+        taskService.retry(id, uid, req);
+        return R.ok();
     }
 
     @GetMapping("/{id}/subtitles")
@@ -160,7 +178,7 @@ public class TaskController {
     }
 
     private TaskVO toVO(TranslationTask t) {
-        return new TaskVO(t.getId(), t.getMode(), t.getStatus(), t.getProgress(),
+        return new TaskVO(t.getId(), t.getMode(), t.getProjectId(), t.getStatus(), t.getProgress(),
                 t.getSourceLang(), t.getTargetLang(), t.getAsrProvider(), t.getLlmModel(),
                 t.getBurnSubtitle(), t.getBilingual(), t.getOriginalFilename(),
                 t.getErrorMsg(), t.getOutputVideoPath() != null, t.getCreatedAt());

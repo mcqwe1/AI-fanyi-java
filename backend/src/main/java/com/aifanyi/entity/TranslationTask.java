@@ -17,6 +17,9 @@ public class TranslationTask {
     /** NORMAL / KB */
     private String mode;
 
+    /** KB 模式所属系列项目 */
+    private Long projectId;
+
     /** 见 TaskStatus */
     private String status;
 

@@ -2,6 +2,7 @@ package com.aifanyi.asr;
 
 import com.aifanyi.common.BizException;
 import com.aifanyi.config.AifanyiProperties;
+import com.aifanyi.media.FfmpegService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -12,6 +13,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -19,6 +21,7 @@ import java.util.List;
 /**
  * Groq 云 Whisper（OpenAI 兼容 audio/transcriptions）。
  * response_format=verbose_json 时返回 segment 级时间戳。
+ * 文件超过 maxChunkBytes 时按静音点自动分块、逐块转写、时间戳加偏移后拼接（Groq 免费档限约 25MB）。
  */
 @Slf4j
 @Component
@@ -27,10 +30,12 @@ public class GroqWhisperProvider implements AsrProvider {
     private final AifanyiProperties.Asr.Groq cfg;
     private final RestClient client;
     private final ObjectMapper mapper;
+    private final FfmpegService ffmpeg;
 
-    public GroqWhisperProvider(AifanyiProperties props, ObjectMapper mapper) {
+    public GroqWhisperProvider(AifanyiProperties props, ObjectMapper mapper, FfmpegService ffmpeg) {
         this.cfg = props.getAsr().getGroq();
         this.mapper = mapper;
+        this.ffmpeg = ffmpeg;
         this.client = RestClient.create();
     }
 
@@ -41,16 +46,112 @@ public class GroqWhisperProvider implements AsrProvider {
 
     @Override
     public List<Segment> transcribe(Path audio, String language, AsrContext ctx) {
-        String apiKey = (ctx != null && StringUtils.hasText(ctx.apiKey())) ? ctx.apiKey() : cfg.getApiKey();
+        String apiKey = ctx == null ? null : ctx.apiKey();
         String model = (ctx != null && StringUtils.hasText(ctx.model())) ? ctx.model() : cfg.getModel();
         if (!StringUtils.hasText(apiKey)) {
-            throw new BizException("未配置 Groq API Key，请在设置里填写或用环境变量");
+            throw new BizException("未配置 Groq API Key，请在「设置 → API 密钥」填写");
         }
 
+        long size;
+        try {
+            size = Files.size(audio);
+        } catch (Exception e) {
+            size = 0;
+        }
+        long maxBytes = cfg.getMaxChunkBytes() > 0 ? cfg.getMaxChunkBytes() : 20L * 1024 * 1024;
+
+        // 未超限：直接单次转写（短文件零额外开销）
+        if (size <= maxBytes) {
+            return transcribeOne(audio, apiKey, model, language);
+        }
+
+        // 超限：按时长估算块数，切点吸附静音，逐块转写后偏移拼接
+        double totalSec = ffmpeg.probeDurationSec(audio);
+        if (totalSec <= 0) {
+            log.warn("Groq 音频超限但探测不到时长，回退单次调用（可能仍 413）: {}", audio);
+            return transcribeOne(audio, apiKey, model, language);
+        }
+
+        double targetBytes = maxBytes * 0.8;                 // 留安全余量，避免吸附后某块超限
+        int numChunks = (int) Math.max(2, Math.ceil(size / targetBytes));
+        double nominalChunk = totalSec / numChunks;
+        List<long[]> silences = ffmpeg.detectSilenceMs(audio, -50, 0.8);
+        List<Double> bounds = computeBoundaries(totalSec, numChunks, nominalChunk, silences);
+
+        log.info("Groq 音频 {} 超限({}MB > {}MB)，分 {} 块转写",
+                audio.getFileName(), size / 1024 / 1024, maxBytes / 1024 / 1024, bounds.size() - 1);
+
+        List<Segment> all = new ArrayList<>();
+        Path dir = audio.getParent();
+        for (int i = 0; i < bounds.size() - 1; i++) {
+            double start = bounds.get(i);
+            double dur = bounds.get(i + 1) - start;
+            if (dur <= 0.1) {
+                continue;
+            }
+            Path chunk = dir.resolve("groqchunk_" + i + ".mp3");
+            try {
+                ffmpeg.cutAudio(audio, chunk, start, dur);
+                long offset = Math.round(start * 1000);
+                for (Segment s : transcribeOne(chunk, apiKey, model, language)) {
+                    all.add(new Segment(s.startMs() + offset, s.endMs() + offset, s.text()));
+                }
+            } finally {
+                try {
+                    Files.deleteIfExists(chunk);
+                } catch (Exception ignore) {
+                    // 临时块文件清理失败不影响结果
+                }
+            }
+        }
+        return all;
+    }
+
+    /**
+     * 计算 numChunks 块的边界时间点（秒）；bounds.size()==numChunks+1，首 0 末 totalSec。
+     * 内部边界吸附到名义点附近的静音段中点，避免把词切断；找不到合适静音则用名义时间点。
+     */
+    private List<Double> computeBoundaries(double totalSec, int numChunks,
+                                           double nominalChunk, List<long[]> silences) {
+        List<Double> bounds = new ArrayList<>();
+        bounds.add(0.0);
+        double prev = 0.0;
+        double window = nominalChunk * 0.2;                  // 只在名义点 ±20% 内找静音，限制块大小波动
+        for (int i = 1; i < numChunks; i++) {
+            double nominal = i * nominalChunk;
+            double best = nominal;
+            double bestDist = Double.MAX_VALUE;
+            if (silences != null) {
+                for (long[] iv : silences) {
+                    double sSec = iv[0] / 1000.0;
+                    double eSec = (iv[1] == Long.MAX_VALUE) ? totalSec : iv[1] / 1000.0;
+                    double mid = (sSec + eSec) / 2.0;
+                    double dist = Math.abs(mid - nominal);
+                    if (dist <= window && dist < bestDist && mid > prev + 1.0 && mid < totalSec - 1.0) {
+                        best = mid;
+                        bestDist = dist;
+                    }
+                }
+            }
+            if (best <= prev + 1.0) {
+                best = nominal;                              // 保证严格递增
+            }
+            bounds.add(best);
+            prev = best;
+        }
+        bounds.add(totalSec);
+        return bounds;
+    }
+
+    /** 单文件一次 Groq 转写，返回该文件内（相对 0 起）的分段。 */
+    private List<Segment> transcribeOne(Path file, String apiKey, String model, String language) {
         MultipartBodyBuilder body = new MultipartBodyBuilder();
-        body.part("file", new FileSystemResource(audio));
+        body.part("file", new FileSystemResource(file));
         body.part("model", model);
         body.part("response_format", "verbose_json");
+        // 同时取 segment 与 word 级时间戳，用 word 收紧字幕起止，避免静音期提前出现
+        body.part("timestamp_granularities[]", "segment");
+        body.part("timestamp_granularities[]", "word");
         if (StringUtils.hasText(language) && !"auto".equalsIgnoreCase(language)) {
             body.part("language", language);
         }
@@ -75,15 +176,21 @@ public class GroqWhisperProvider implements AsrProvider {
         try {
             JsonNode root = mapper.readTree(json);
             JsonNode segs = root.path("segments");
+            JsonNode words = root.path("words");
             List<Segment> result = new ArrayList<>();
             if (segs.isArray() && !segs.isEmpty()) {
                 for (JsonNode s : segs) {
-                    long start = Math.round(s.path("start").asDouble() * 1000);
-                    long end = Math.round(s.path("end").asDouble() * 1000);
                     String text = s.path("text").asText("").trim();
-                    if (!text.isEmpty()) {
-                        result.add(new Segment(start, end, text));
+                    if (text.isEmpty()) {
+                        continue;
                     }
+                    double segStart = s.path("start").asDouble();
+                    double segEnd = s.path("end").asDouble();
+                    // 用 word 时间戳收紧到“第一个词出声 ~ 最后一个词结束”
+                    double[] tight = tightenWithWords(words, segStart, segEnd);
+                    long start = Math.round(tight[0] * 1000);
+                    long end = Math.round(tight[1] * 1000);
+                    result.add(new Segment(start, end, text));
                 }
             } else {
                 // 兜底：没有 segments 时把整段文本作为一条
@@ -96,5 +203,33 @@ public class GroqWhisperProvider implements AsrProvider {
         } catch (Exception e) {
             throw new BizException("解析 Groq 响应失败: " + e.getMessage());
         }
+    }
+
+    /**
+     * 用落在该 segment 时间范围内的词，取首词 start 与末词 end，收紧字幕显示区间。
+     * 没有可用 word 时回退到 segment 原始 start/end。
+     */
+    private double[] tightenWithWords(JsonNode words, double segStart, double segEnd) {
+        if (words == null || !words.isArray() || words.isEmpty()) {
+            return new double[]{segStart, segEnd};
+        }
+        final double eps = 0.1;
+        double first = Double.NaN;
+        double last = Double.NaN;
+        for (JsonNode w : words) {
+            double ws = w.path("start").asDouble();
+            double we = w.path("end").asDouble();
+            // 词的起点落在该段范围内即归属本段
+            if (ws >= segStart - eps && ws < segEnd + eps) {
+                if (Double.isNaN(first)) {
+                    first = ws;
+                }
+                last = we;
+            }
+        }
+        if (Double.isNaN(first) || Double.isNaN(last) || last <= first) {
+            return new double[]{segStart, segEnd};
+        }
+        return new double[]{first, last};
     }
 }

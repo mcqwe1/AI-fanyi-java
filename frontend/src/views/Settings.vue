@@ -11,7 +11,7 @@
         <!-- API 密钥 -->
         <el-tab-pane label="API 密钥" name="keys">
           <el-alert type="info" :closable="false" show-icon style="margin-bottom:16px"
-                    title="密钥仅保存在你自己的数据库，留空表示不修改。修改后立即对新任务生效。" />
+                    title="所有密钥/Base URL/模型均在此配置并仅存于你自己的数据库（不再读环境变量）；留空表示不修改，保存后对新任务生效。" />
           <el-form label-width="150px" style="max-width:560px">
             <el-divider content-position="left">翻译模型（OpenAI 兼容）</el-divider>
             <el-form-item label="Base URL">
@@ -21,7 +21,14 @@
               <el-input v-model="form.llmApiKey" :placeholder="ph('llmApiKey')" show-password />
             </el-form-item>
             <el-form-item label="模型">
-              <el-input v-model="form.llmModel" placeholder="如 deepseek-v4-flash" />
+              <div style="display:flex; gap:8px">
+                <el-select v-model="form.llmModel" filterable allow-create default-first-option
+                           placeholder="选择或输入模型名，如 deepseek-v4-flash" style="flex:1">
+                  <el-option v-for="m in llmModels" :key="m" :label="m" :value="m" />
+                </el-select>
+                <el-button :loading="fetchingModels" @click="fetchModels">拉取模型</el-button>
+              </div>
+              <div class="tip">用上方 Base URL + API Key 拉取该端点支持的模型（Key 留空则用已保存的）</div>
             </el-form-item>
 
             <el-divider content-position="left">语音识别</el-divider>
@@ -37,9 +44,23 @@
               <div class="tip">GLM-ASR 用，格式 id.secret</div>
             </el-form-item>
 
-            <el-divider content-position="left">知识库模式（阶段3）</el-divider>
+            <el-divider content-position="left">知识库 Gemini（联网抽术语）</el-divider>
+            <el-form-item label="Base URL">
+              <el-input v-model="form.geminiBaseUrl"
+                        placeholder="本机代理 http://localhost:8050/v1 或官方 https://generativelanguage.googleapis.com/v1beta/openai" />
+            </el-form-item>
             <el-form-item label="Gemini API Key">
               <el-input v-model="form.geminiApiKey" :placeholder="ph('geminiApiKey')" show-password />
+            </el-form-item>
+            <el-form-item label="模型">
+              <div style="display:flex; gap:8px">
+                <el-select v-model="form.geminiModel" filterable allow-create default-first-option
+                           placeholder="选择或输入模型名，如 gemini-3-flash-preview-search" style="flex:1">
+                  <el-option v-for="m in geminiModels" :key="m" :label="m" :value="m" />
+                </el-select>
+                <el-button :loading="fetchingGeminiModels" @click="fetchGeminiModels">拉取模型</el-button>
+              </div>
+              <div class="tip">-search 后缀模型＝联网搜索核实译法（本机代理支持）；Key 留空则用已保存的</div>
             </el-form-item>
 
             <el-form-item>
@@ -81,6 +102,11 @@
               </template>
             </el-table-column>
             <el-table-column prop="createdAt" label="创建时间" width="170" />
+            <el-table-column label="操作" width="70">
+              <template slot-scope="{ row }">
+                <el-button type="text" class="del" @click="remove(row)">删除</el-button>
+              </template>
+            </el-table-column>
           </el-table>
         </el-tab-pane>
       </el-tabs>
@@ -99,10 +125,15 @@ export default {
       settings: null,
       form: {
         groqApiKey: '', llmBaseUrl: '', llmApiKey: '', llmModel: '',
-        dashscopeApiKey: '', zhipuApiKey: '', geminiApiKey: ''
+        dashscopeApiKey: '', zhipuApiKey: '',
+        geminiBaseUrl: '', geminiApiKey: '', geminiModel: ''
       },
       pwd: { oldPassword: '', newPassword: '', confirm: '' },
       tasks: [],
+      llmModels: [],
+      fetchingModels: false,
+      geminiModels: [],
+      fetchingGeminiModels: false,
       savingKeys: false,
       savingPwd: false
     }
@@ -118,14 +149,49 @@ export default {
         this.settings = r.data
         this.form.llmBaseUrl = r.data.llmBaseUrl || ''
         this.form.llmModel = r.data.llmModel || ''
+        this.form.geminiBaseUrl = r.data.geminiBaseUrl || ''
+        this.form.geminiModel = r.data.geminiModel || ''
       } catch (e) { /* ignore */ }
     },
     loadHistory () {
       http.get('/tasks').then(r => { this.tasks = r.data }).catch(() => {})
     },
+    remove (row) {
+      this.$confirm(`确定删除任务「${row.originalFilename || row.id}」吗？字幕与文件将一并清除，不可恢复。`, '删除任务', {
+        confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning'
+      }).then(async () => {
+        try {
+          await http.delete(`/tasks/${row.id}`)
+          this.$message.success('已删除')
+          this.loadHistory()
+        } catch (e) { /* 拦截器已提示 */ }
+      }).catch(() => {})
+    },
     ph (field) {
       const s = this.settings && this.settings[field]
       return s && s.set ? `已配置 ${s.masked}，留空不改` : '未配置'
+    },
+    async fetchModels () {
+      this.fetchingModels = true
+      try {
+        const r = await http.post('/settings/llm/models', {
+          baseUrl: this.form.llmBaseUrl,
+          apiKey: this.form.llmApiKey
+        })
+        this.llmModels = r.data || []
+        this.$message.success(`拉取到 ${this.llmModels.length} 个模型`)
+      } catch (e) { /* 拦截器已提示 */ } finally { this.fetchingModels = false }
+    },
+    async fetchGeminiModels () {
+      this.fetchingGeminiModels = true
+      try {
+        const r = await http.post('/settings/gemini/models', {
+          baseUrl: this.form.geminiBaseUrl,
+          apiKey: this.form.geminiApiKey
+        })
+        this.geminiModels = r.data || []
+        this.$message.success(`拉取到 ${this.geminiModels.length} 个模型`)
+      } catch (e) { /* 拦截器已提示 */ } finally { this.fetchingGeminiModels = false }
     },
     async saveKeys () {
       this.savingKeys = true
@@ -163,4 +229,5 @@ export default {
 }
 .body { max-width: 900px; margin: 24px auto; padding: 0 16px; }
 .tip { color: #999; font-size: 12px; line-height: 1.6; }
+.del { color: #f56c6c; }
 </style>

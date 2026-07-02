@@ -1,8 +1,14 @@
-# 阶段1 仅需 FastAPI 骨架
+# 阶段1 骨架
 fastapi
 uvicorn[standard]
 
-# 阶段2 取消注释（建议用独立的 Python 3.11/3.12 venv —— torch 等暂无 3.14 wheel）
-# faster-whisper
-# whisperx
+# 阶段2 本地 ASR（独立的 Python 3.11/3.12 venv —— torch/ct2 暂无 3.14 wheel）
+faster-whisper>=1.1.0
+
+# GPU（CUDA 12）运行库：CTranslate2 4.x 依赖 cuBLAS + cuDNN 9
+# 纯 CPU 跑可不装这两行
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
+
+# 阶段3
 # google-genai

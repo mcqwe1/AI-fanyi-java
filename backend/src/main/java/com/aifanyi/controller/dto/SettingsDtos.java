@@ -13,7 +13,9 @@ public class SettingsDtos {
             String llmModel,
             SecretView dashscopeApiKey,
             SecretView zhipuApiKey,
-            SecretView geminiApiKey
+            String geminiBaseUrl,
+            SecretView geminiApiKey,
+            String geminiModel
     ) {
     }
 
@@ -25,13 +27,22 @@ public class SettingsDtos {
             String llmModel,
             String dashscopeApiKey,
             String zhipuApiKey,
-            String geminiApiKey
+            String geminiBaseUrl,
+            String geminiApiKey,
+            String geminiModel
     ) {
     }
 
     public record ChangePasswordReq(
             String oldPassword,
             String newPassword
+    ) {
+    }
+
+    /** 拉取可用模型：用填写的 baseUrl/apiKey；留空则回退到已保存的有效配置。 */
+    public record ListModelsReq(
+            String baseUrl,
+            String apiKey
     ) {
     }
 }

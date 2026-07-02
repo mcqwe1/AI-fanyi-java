@@ -23,7 +23,9 @@ public class UserSetting {
     private String llmModel;
     private String dashscopeApiKey;
     private String zhipuApiKey;
+    private String geminiBaseUrl;
     private String geminiApiKey;
+    private String geminiModel;
 
     private LocalDateTime updatedAt;
 }

@@ -3,7 +3,7 @@
 $root = $PSScriptRoot
 $envFile = Join-Path $root ".env"
 if (Test-Path $envFile) {
-  Get-Content $envFile | ForEach-Object {
+  Get-Content $envFile -Encoding UTF8 | ForEach-Object {
     $line = $_.Trim()
     if ($line -and -not $line.StartsWith("#") -and $line.Contains("=")) {
       $idx = $line.IndexOf("=")

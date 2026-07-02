@@ -24,6 +24,13 @@ public class LocalStorageService implements StorageService {
             r = System.getProperty("java.io.tmpdir") + "/aifanyi-data";
         }
         this.root = Paths.get(r).toAbsolutePath().normalize();
+        // multipart 上传临时目录（与存储同盘，见 application.yml multipart.location）；确保存在，
+        // 否则 Tomcat 写分片时会因目录缺失报错。
+        try {
+            Files.createDirectories(this.root.resolve(".uploadtmp"));
+        } catch (IOException e) {
+            log.warn("创建上传临时目录失败: {}", e.getMessage());
+        }
     }
 
     @Override
@@ -52,5 +59,27 @@ public class LocalStorageService implements StorageService {
     @Override
     public Path resolve(Long taskId, String filename) {
         return taskDir(taskId).resolve(filename);
+    }
+
+    @Override
+    public void deleteTaskDir(Long taskId) {
+        // 直接拼路径，不要走 taskDir()（那会顺手创建目录）
+        Path dir = root.resolve("tasks").resolve(String.valueOf(taskId));
+        if (!Files.exists(dir)) {
+            return;
+        }
+        try (var paths = Files.walk(dir)) {
+            // 自底向上删：先文件后目录
+            paths.sorted(java.util.Comparator.reverseOrder())
+                    .forEach(p -> {
+                        try {
+                            Files.deleteIfExists(p);
+                        } catch (IOException e) {
+                            log.warn("删除文件失败 {}: {}", p, e.getMessage());
+                        }
+                    });
+        } catch (IOException e) {
+            throw new BizException("删除任务目录失败: " + e.getMessage());
+        }
     }
 }
