@@ -122,6 +122,41 @@ def health():
     return {"status": "ok", "resolved": _resolved or None}
 
 
+class VadRequest(BaseModel):
+    audio_path: str
+
+
+class VadRegion(BaseModel):
+    start: float                        # 秒
+    end: float
+
+
+class VadResponse(BaseModel):
+    regions: List[VadRegion]
+
+
+@app.post("/vad", response_model=VadResponse)
+def vad(req: VadRequest):
+    """Silero VAD 语音区间检测（CPU，一次全音频）。
+    后端用它把字幕起点吸附到真实说话点，治“字幕比说话早出现”
+    （Whisper 把开场噪声并进首段、词级时间戳也被对齐抹到 0 的场景）。
+    threshold=0.3 偏宽松：轻声/气声也算语音，保证吸附绝不吃掉真实语音起点。"""
+    if not os.path.isfile(req.audio_path):
+        raise HTTPException(status_code=400, detail=f"音频文件不存在: {req.audio_path}")
+    try:
+        from faster_whisper.audio import decode_audio
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+        audio = decode_audio(req.audio_path, sampling_rate=16000)
+        opts = VadOptions(threshold=0.3, min_silence_duration_ms=400, speech_pad_ms=120)
+        ts = get_speech_timestamps(audio, opts)
+        regions = [VadRegion(start=t["start"] / 16000.0, end=t["end"] / 16000.0) for t in ts]
+        return VadResponse(regions=regions)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"VAD 失败: {e}")
+
+
 class TranscribeRequest(BaseModel):
     audio_path: str
     language: Optional[str] = None      # 源语言（如 "en"），None/"auto" 自动检测
@@ -184,13 +219,17 @@ def transcribe(req: TranscribeRequest):
     lang = _norm_lang(req.language)
 
     try:
-        # vad_filter 在静音处直接切断，从源头消除 Whisper 的静音幻觉
+        # vad_filter 在静音处直接切断，从源头消除 Whisper 的静音幻觉；
+        # condition_on_previous_text=False 切断上下文传染，治复读循环与错误扩散；
+        # hallucination_silence_threshold 配合 word 时间戳跳过疑似幻觉的长静音段
         segments, info = model.transcribe(
             req.audio_path,
             language=lang,
             word_timestamps=True,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
+            condition_on_previous_text=False,
+            hallucination_silence_threshold=2.0,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"转写失败: {e}")
@@ -200,6 +239,8 @@ def transcribe(req: TranscribeRequest):
         text = (s.text or "").strip()
         if not text:
             continue
+        # 反幻觉不在此重复判定：faster-whisper 已按 no_speech_threshold=0.6 / log_prob_threshold=-1.0
+        # 在解码时整窗丢弃低置信度静音段（见 transcribe 默认阈值），产出的 segment 必然已通过该门槛。
         words = [Word(start=float(w.start), end=float(w.end), text=w.word)
                  for w in (s.words or []) if w.start is not None and w.end is not None]
         # 用 word 收紧到“首词出声 ~ 末词结束”，没有 word 时回退 segment 原始区间

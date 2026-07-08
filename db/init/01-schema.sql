@@ -105,3 +105,22 @@ CREATE TABLE IF NOT EXISTS `glossary_term` (
   PRIMARY KEY (`id`),
   KEY `idx_project` (`project_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='术语表条目';
+
+-- 文本翻译历史（AI 文本翻译模式，与视频翻译任务分开）
+CREATE TABLE IF NOT EXISTS `text_translation` (
+  `id`                 BIGINT       NOT NULL AUTO_INCREMENT,
+  `user_id`            BIGINT       NOT NULL,
+  `target_lang`        VARCHAR(50)  NOT NULL DEFAULT '中文',
+  `preview`            VARCHAR(200) DEFAULT NULL COMMENT '原文摘要（列表展示用，入库时截断）',
+  `source_text`        MEDIUMTEXT   NOT NULL COMMENT '原始输入全文',
+  `plain_target`       MEDIUMTEXT   COMMENT '纯译文（按原始行结构还原）',
+  `pairs_json`         MEDIUMTEXT   COMMENT '逐行对照 [{source,target}] JSON，回放对照视图用',
+  `model`              VARCHAR(100) DEFAULT NULL,
+  `elapsed_ms`         BIGINT       NOT NULL DEFAULT 0,
+  `untranslated_lines` INT          NOT NULL DEFAULT 0 COMMENT '疑似未翻译（译文=原文）的行数',
+  `deleted`            TINYINT      NOT NULL DEFAULT 0,
+  `created_at`         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_user` (`user_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文本翻译历史';

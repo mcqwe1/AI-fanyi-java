@@ -20,6 +20,11 @@
         <h3>AI 知识库翻译</h3>
         <p>AI 先观看视频建立知识库，结合知识库翻译并输出前情提要（阶段3）</p>
       </el-card>
+      <el-card class="mode-card" shadow="hover" @click.native="$router.push('/text')">
+        <i class="el-icon-document mode-icon" />
+        <h3>AI 文本翻译</h3>
+        <p>粘贴任意文本 → 即时翻译，历史可导出 txt / 双语对照</p>
+      </el-card>
     </div>
   </div>
 </template>

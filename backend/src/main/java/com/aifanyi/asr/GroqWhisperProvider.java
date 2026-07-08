@@ -17,6 +17,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * Groq 云 Whisper（OpenAI 兼容 audio/transcriptions）。
@@ -83,6 +85,8 @@ public class GroqWhisperProvider implements AsrProvider {
 
         List<Segment> all = new ArrayList<>();
         Path dir = audio.getParent();
+        // 语言锁定：auto 时各块独立检测易中途漂移（日文音频冒英文句），用首块检测结果锁定后续块
+        String lockedLang = language;
         for (int i = 0; i < bounds.size() - 1; i++) {
             double start = bounds.get(i);
             double dur = bounds.get(i + 1) - start;
@@ -92,8 +96,18 @@ public class GroqWhisperProvider implements AsrProvider {
             Path chunk = dir.resolve("groqchunk_" + i + ".mp3");
             try {
                 ffmpeg.cutAudio(audio, chunk, start, dur);
+                JsonNode root = readJson(callGroq(chunk, apiKey, model, lockedLang));
+                List<Segment> parsed = parse(root);
+                if (!StringUtils.hasText(lockedLang) || "auto".equalsIgnoreCase(lockedLang)) {
+                    String det = detectedLangCode(root);
+                    // 全部段都被反幻觉过滤掉的块（纯噪声/静音），其语言检测基于噪声，不能拿来锁定
+                    if (det != null && !parsed.isEmpty()) {
+                        lockedLang = det;
+                        log.info("Groq 分块转写语言锁定为 {}（据首个有效块检测）", det);
+                    }
+                }
                 long offset = Math.round(start * 1000);
-                for (Segment s : transcribeOne(chunk, apiKey, model, language)) {
+                for (Segment s : parsed) {
                     all.add(new Segment(s.startMs() + offset, s.endMs() + offset, s.text()));
                 }
             } finally {
@@ -145,6 +159,11 @@ public class GroqWhisperProvider implements AsrProvider {
 
     /** 单文件一次 Groq 转写，返回该文件内（相对 0 起）的分段。 */
     private List<Segment> transcribeOne(Path file, String apiKey, String model, String language) {
+        return parse(readJson(callGroq(file, apiKey, model, language)));
+    }
+
+    /** 发起一次 Groq 转写请求，返回原始 verbose_json。 */
+    private String callGroq(Path file, String apiKey, String model, String language) {
         MultipartBodyBuilder body = new MultipartBodyBuilder();
         body.part("file", new FileSystemResource(file));
         body.part("model", model);
@@ -169,19 +188,67 @@ public class GroqWhisperProvider implements AsrProvider {
             throw new BizException("Groq 转写请求失败: " + e.getMessage());
         }
 
-        return parse(json);
+        return json;
     }
 
-    private List<Segment> parse(String json) {
+    /** verbose_json 的 language 是英文全名（如 japanese）；映射为 ISO 代码用于锁定后续块。 */
+    private static final Map<String, String> LANG_NAME_TO_CODE = Map.ofEntries(
+            Map.entry("japanese", "ja"), Map.entry("english", "en"),
+            Map.entry("chinese", "zh"), Map.entry("korean", "ko"),
+            Map.entry("french", "fr"), Map.entry("german", "de"),
+            Map.entry("spanish", "es"), Map.entry("russian", "ru"),
+            Map.entry("portuguese", "pt"), Map.entry("italian", "it"),
+            Map.entry("thai", "th"), Map.entry("vietnamese", "vi"),
+            Map.entry("arabic", "ar"), Map.entry("hindi", "hi"),
+            Map.entry("indonesian", "id"), Map.entry("dutch", "nl"));
+
+    /** 从 verbose_json 提取检测语言并转 ISO 代码；取不到/不认识返回 null（不锁定）。 */
+    private String detectedLangCode(JsonNode root) {
+        String name = root.path("language").asText("").trim().toLowerCase(Locale.ROOT);
+        if (name.isEmpty()) {
+            return null;
+        }
+        if (name.length() == 2) {
+            return name;
+        }
+        String code = LANG_NAME_TO_CODE.get(name);
+        if (code == null) {
+            log.debug("Groq 检测语言 {} 不在映射表中，本块不锁定语言", name);
+        }
+        return code;
+    }
+
+    /** 解析 Groq 返回的 verbose_json 文本为 JSON 树；失败抛业务异常。 */
+    private JsonNode readJson(String json) {
         try {
-            JsonNode root = mapper.readTree(json);
+            return mapper.readTree(json);
+        } catch (Exception e) {
+            throw new BizException("解析 Groq 响应失败: " + e.getMessage());
+        }
+    }
+
+    /** 教科书式静音/噪声幻觉判定阈值：openai-whisper 的默认跳窗条件
+     *  （本地路径 faster-whisper 内部已按同阈值整窗丢弃，此处为 Groq 路径补齐同一行为）。 */
+    private static final double HALLUCINATION_NO_SPEECH_PROB = 0.6;
+    private static final double HALLUCINATION_AVG_LOGPROB = -1.0;
+
+    private List<Segment> parse(JsonNode root) {
+        try {
             JsonNode segs = root.path("segments");
             JsonNode words = root.path("words");
             List<Segment> result = new ArrayList<>();
             if (segs.isArray() && !segs.isEmpty()) {
+                int dropped = 0;
                 for (JsonNode s : segs) {
                     String text = s.path("text").asText("").trim();
                     if (text.isEmpty()) {
+                        continue;
+                    }
+                    // 教科书式静音/噪声幻觉特征：模型自认多半没在说话且置信度低 → 丢弃
+                    double noSpeech = s.path("no_speech_prob").asDouble(0);
+                    double logProb = s.path("avg_logprob").asDouble(0);
+                    if (noSpeech > HALLUCINATION_NO_SPEECH_PROB && logProb < HALLUCINATION_AVG_LOGPROB) {
+                        dropped++;
                         continue;
                     }
                     double segStart = s.path("start").asDouble();
@@ -191,6 +258,9 @@ public class GroqWhisperProvider implements AsrProvider {
                     long start = Math.round(tight[0] * 1000);
                     long end = Math.round(tight[1] * 1000);
                     result.add(new Segment(start, end, text));
+                }
+                if (dropped > 0) {
+                    log.info("Groq 反幻觉：丢弃 {} 条低置信度段(no_speech>0.6 & logprob<-1.0)", dropped);
                 }
             } else {
                 // 兜底：没有 segments 时把整段文本作为一条

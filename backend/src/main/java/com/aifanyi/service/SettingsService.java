@@ -104,6 +104,35 @@ public class SettingsService {
         return new GeminiConfig(base.trim(), key.trim(), model.trim());
     }
 
+    /** KB 翻译并发上限：与 GeminiClient.MAX_PARALLEL 同量级，避免压垮个人代理/触发 Vertex 配额。 */
+    private static final int KB_MAX_CONCURRENCY = 6;
+
+    /**
+     * 按任务模式解析翻译配置：KB 模式与抽术语同用 Gemini（保证术语表遵循一致），
+     * 普通模式用「设置 → API 密钥」里的 LLM 配置。模式路由收在这里，新增翻译入口不必各自记得分流。
+     */
+    public LlmConfig effectiveTranslationLlm(Long userId, boolean kbMode) {
+        return kbMode ? effectiveKbLlm(userId) : effectiveLlm(userId);
+    }
+
+    /**
+     * KB（术语表）模式的翻译配置：与抽术语用同一 Gemini 端点/模型，保证术语表遵循的一致性
+     * （DeepSeek 等第三方模型偶尔不按 Gemini 建的术语表翻译）。
+     * 模型剥掉 -search 后缀——联网 grounding 只对抽术语有价值，批量翻译带上只会又慢又贵。
+     * disableThinking 固定 false（有意为之）：thinking:{type:disabled} 是 DeepSeek 系方言字段，
+     * Gemini 代理不认识，发了没意义；vertex2openai 实测不带该字段即可正常翻译。
+     * 并发压到 KB_MAX_CONCURRENCY——429 会被 OpenAiTranslator 静默回退为原文，宁可慢一点。
+     */
+    private LlmConfig effectiveKbLlm(Long userId) {
+        GeminiConfig g = effectiveGemini(userId);
+        String model = g.model().endsWith("-search")
+                ? g.model().substring(0, g.model().length() - "-search".length())
+                : g.model();
+        AifanyiProperties.Llm tune = props.getLlm();
+        return new LlmConfig(g.baseUrl(), g.apiKey(), model,
+                false, tune.getBatchSize(), Math.min(tune.getConcurrency(), KB_MAX_CONCURRENCY));
+    }
+
     public String effectiveGroqKey(Long userId) {
         UserSetting s = load(userId);
         return s == null ? null : s.getGroqApiKey();

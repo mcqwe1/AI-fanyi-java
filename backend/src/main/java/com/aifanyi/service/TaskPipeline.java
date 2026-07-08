@@ -4,6 +4,8 @@ import com.aifanyi.asr.AsrContext;
 import com.aifanyi.asr.AsrProvider;
 import com.aifanyi.asr.AsrProviderFactory;
 import com.aifanyi.asr.Segment;
+import com.aifanyi.asr.VadClient;
+import com.aifanyi.common.BizException;
 import com.aifanyi.domain.TaskMode;
 import com.aifanyi.domain.TaskStatus;
 import com.aifanyi.entity.GlossaryTerm;
@@ -17,7 +19,9 @@ import com.aifanyi.mapper.GlossaryTermMapper;
 import com.aifanyi.mapper.SubtitleMapper;
 import com.aifanyi.mapper.TranslationTaskMapper;
 import com.aifanyi.media.FfmpegService;
+import com.aifanyi.media.HallucinationFilter;
 import com.aifanyi.media.SrtService;
+import com.aifanyi.media.SubtitleTimingFixer;
 import com.aifanyi.storage.StorageService;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
@@ -32,6 +36,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 普通模式翻译流水线（异步）。
@@ -49,6 +54,7 @@ public class TaskPipeline {
     private final StorageService storage;
     private final FfmpegService ffmpeg;
     private final AsrProviderFactory asrFactory;
+    private final VadClient vadClient;
     private final LlmTranslator translator;
     private final GeminiClient gemini;
     private final SettingsService settings;
@@ -68,6 +74,9 @@ public class TaskPipeline {
             ffmpeg.extractAudio(video, audio);
             task.setAudioPath(audio.toString());
             taskMapper.updateById(task);
+            // VAD 与 ASR 并行：只依赖已抽出的音频，整段耗时藏进转写里（结果在吸附前 join）
+            CompletableFuture<List<long[]>> vadFuture =
+                    CompletableFuture.supplyAsync(() -> vadClient.speechRegionsMs(audio));
 
             // 2. ASR 转写（按用户设置解析 provider/model/key）
             update(task, TaskStatus.TRANSCRIBING, 30);
@@ -76,16 +85,30 @@ public class TaskPipeline {
             List<Segment> segments = asr.transcribe(audio, normLang(task.getSourceLang()),
                     new AsrContext(route.apiKey(), route.model()));
             if (segments.isEmpty()) {
-                throw new com.aifanyi.common.BizException("未识别到语音内容");
+                throw new BizException("未识别到语音内容");
             }
+            // 文本层反幻觉：黑名单套话 + 复读折叠（对所有 provider 生效）
+            segments = HallucinationFilter.filter(segments);
             // 丢弃静音处的幻觉字幕（Whisper 常在静音段幻觉"感谢观看/you"等）
-            java.util.List<long[]> silence = ffmpeg.detectSilenceMs(audio, -50, 0.8);
-            segments = com.aifanyi.media.SubtitleTimingFixer.dropSilenceHallucinations(segments, silence);
+            List<long[]> silence = ffmpeg.detectSilenceMs(audio, -50, 0.8);
+            segments = SubtitleTimingFixer.dropSilenceHallucinations(segments, silence);
             if (segments.isEmpty()) {
-                throw new com.aifanyi.common.BizException("未识别到有效语音（疑似全静音）");
+                throw new BizException("未识别到有效语音（疑似全静音）");
+            }
+            // VAD 起点吸附：把被开场/间奏噪声拖早的字幕起点收紧到真实说话点
+            // （对所有 provider 生效；ai-service 不可用则跳过，不影响任务。
+            //   catch 只包 VAD 请求本身——吸附逻辑自身的 bug 不该被吞成一条 warn）
+            List<long[]> vadRegions = null;
+            try {
+                vadRegions = vadFuture.join();
+            } catch (Exception e) {
+                log.warn("VAD 起点吸附跳过: {}", e.getMessage());
+            }
+            if (vadRegions != null) {
+                segments = SubtitleTimingFixer.snapToSpeechOnsets(segments, vadRegions);
             }
             // 修正时间轴：去空白、去重叠（避免下一句字幕提前出现）、兜底最短时长
-            segments = com.aifanyi.media.SubtitleTimingFixer.fix(segments);
+            segments = SubtitleTimingFixer.fix(segments);
 
             List<String> sources = segments.stream().map(Segment::text).toList();
 
@@ -108,9 +131,10 @@ public class TaskPipeline {
                 glossary = loadGlossary(task.getProjectId());
             }
 
-            // 3. LLM 翻译（按用户设置解析 baseUrl/key/model；KB 模式套术语表）
+            // 3. LLM 翻译（KB 模式与抽术语同用 Gemini，保证术语表遵循一致；普通模式用 LLM 设置）
             update(task, TaskStatus.TRANSLATING, 60);
-            LlmConfig llmCfg = settings.effectiveLlm(task.getUserId());
+            LlmConfig llmCfg = settings.effectiveTranslationLlm(task.getUserId(), kb);
+            log.info("翻译使用模型: {} @ {}", llmCfg.model(), llmCfg.baseUrl());
             List<String> targets = translator.translate(sources, task.getTargetLang(), llmCfg, glossary);
 
             // 4. 落库字幕

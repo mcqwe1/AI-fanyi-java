@@ -232,7 +232,8 @@ public class OpenAiTranslator implements LlmTranslator {
         String resp;
         try {
             resp = client.post()
-                    .uri(cfg.baseUrl() + "/chat/completions")
+                    // 尾斜杠必须剥掉：FastAPI 系代理把 //chat/completions 当另一条路径直接 404
+                    .uri(cfg.baseUrl().replaceAll("/+$", "") + "/chat/completions")
                     .header("Authorization", "Bearer " + cfg.apiKey())
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(mapper.writeValueAsString(req))

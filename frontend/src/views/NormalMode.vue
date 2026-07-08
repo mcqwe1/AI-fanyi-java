@@ -80,22 +80,13 @@
 <script>
 import http from '../api/http'
 import StyleDialog from '../components/StyleDialog.vue'
+import { LANG_GROUPS } from '../constants/langs'
 
 const STATUS_TEXT = {
   PENDING: '排队中', EXTRACTING_AUDIO: '提取音频', TRANSCRIBING: '语音转文字',
   ANALYZING_VIDEO: '分析视频', BUILDING_KB: '构建知识库', TRANSLATING: 'AI 翻译中',
   BURNING: '烧录字幕', DONE: '完成', FAILED: '失败'
 }
-
-// 目标语言（自由文本，直接拼进翻译 prompt，LLM 支持的主要语言）
-const LANG_GROUPS = [
-  { label: '常用', langs: ['中文', '繁体中文', '英语', '日语', '韩语'] },
-  { label: '欧洲', langs: ['法语', '德语', '西班牙语', '葡萄牙语', '意大利语', '荷兰语', '俄语', '乌克兰语', '波兰语', '捷克语', '匈牙利语', '罗马尼亚语', '希腊语', '瑞典语', '挪威语', '丹麦语', '芬兰语', '塞尔维亚语', '克罗地亚语', '保加利亚语'] },
-  { label: '中东', langs: ['阿拉伯语', '土耳其语', '波斯语', '希伯来语'] },
-  { label: '南亚', langs: ['印地语', '孟加拉语', '乌尔都语', '泰米尔语', '泰卢固语'] },
-  { label: '东南亚', langs: ['泰语', '越南语', '印尼语', '马来语', '菲律宾语', '缅甸语', '高棉语', '老挝语'] },
-  { label: '其他', langs: ['斯瓦希里语'] }
-]
 
 export default {
   name: 'NormalMode',

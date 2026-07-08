@@ -4,6 +4,7 @@ import Login from '../views/Login.vue'
 import Home from '../views/Home.vue'
 import NormalMode from '../views/NormalMode.vue'
 import KbMode from '../views/KbMode.vue'
+import TextMode from '../views/TextMode.vue'
 import Settings from '../views/Settings.vue'
 
 Vue.use(VueRouter)
@@ -13,6 +14,7 @@ const routes = [
   { path: '/', component: Home },
   { path: '/normal', component: NormalMode },
   { path: '/kb', component: KbMode },
+  { path: '/text', component: TextMode },
   { path: '/settings', component: Settings }
 ]
 
