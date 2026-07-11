@@ -1,7 +1,7 @@
 # aifanyi 项目理解文档
 
 > 我（Claude）维护的项目认知速查。每次开工前先读这份，避免重复踩坑。
-> 最后更新：2026-06-27
+> 最后更新：2026-07-10
 
 ---
 
@@ -24,12 +24,25 @@ demo 账号：`demo / demo123`（userId=1）。
 上传 → 存 source.mp4 → PENDING
  → FFmpeg 抽 audio.mp3            EXTRACTING_AUDIO
  → AsrProvider 转写（带词级时间戳） TRANSCRIBING
- → 静音幻觉过滤 + 时间轴修正
+ → 反幻觉 + 时间轴对齐（见下）
  → OpenAiTranslator 批量并发翻译   TRANSLATING
  → 落库 subtitle 表 + 生成 subtitle.srt
  → (可选) 烧录 ASS 字幕进视频       BURNING
  → DONE / 任一步异常 FAILED
 ```
+
+### 反幻觉 + 时间轴后处理链（2026-07-10 重做，`TaskPipeline` → `SubtitleTimingFixer`/`HallucinationFilter`）
+```
+HallucinationFilter.filter        黑名单套话(含"晚安/おやすみ"家族) + 复读折叠 + 数字连跑
+→ dropNonSpeech(VAD)              段窗口(前放宽1.2s/后0.4s)与语音区间重叠<250ms → 幻觉丢弃(文本无关)
+→ alignToSpeech(VAD)              双向对齐：早出后移(>200ms)、晚出前拉(>150ms,上限1.2s,不越上一条)、
+                                  终点修剪(拖静音>500ms→语音尾+400ms)、外扩(语音未完>300ms,上限1.5s,不压下一条)
+→ [VAD 不可用时退回 ffmpeg silencedetect -50dB 的 dropSilenceHallucinations，不做对齐]
+→ shiftAll(probeAvStartOffsetMs)  补回 audio 流相对 video 流的 start_time 偏移(抽音频会丢失,|off|≥50ms 才动)
+→ fix                             去空白/去重叠/最短时长兜底
+```
+VAD 区间来自 ai-service `/vad`（Silero threshold=0.3 宽松 + pad 120ms），与 ASR 并行计算。
+单测：`SubtitleTimingFixerTest`（15例）/`HallucinationFilterTest`（3例）。
 状态枚举 `TaskStatus`：PENDING / EXTRACTING_AUDIO / TRANSCRIBING / ANALYZING_VIDEO / BUILDING_KB / TRANSLATING / BURNING / DONE / FAILED。
 
 ## 4. 后端关键结构（`com.aifanyi`）
@@ -93,4 +106,6 @@ TranslationTask task = taskService.getOwned(id, uid); // 不存在或非本人 �
 ## 9. 已完成 vs 待办
 - ✅ 阶段0/1：JWT 登录、普通流水线、ASR 抽象、翻译优化、字幕烧录+样式+预览、设置页、静音幻觉修复。
 - ✅ 本地 faster-whisper（base/small/medium/large-v3，GPU，VAD）端到端验证（2026-06-26）。
+- ✅ 时间轴/幻觉大修（2026-07-10）：VAD 双向对齐（治早出+晚出+终点）、文本无关的非语音幻觉丢弃、
+  A/V 流起始偏移补偿、黑名单补"晚安"家族（日语源幻觉 おやすみなさい 译成"晚安"反复出现的元凶）。
 - ⏳ 待办：Qwen3-ASR / GLM-ASR provider 未实现；阶段3 知识库模式（Gemini）。

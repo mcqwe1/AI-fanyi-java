@@ -40,6 +40,17 @@
           <el-form-item label="选项">
             <el-checkbox v-model="bilingual">双语字幕</el-checkbox>
           </el-form-item>
+          <el-form-item label="翻译风格">
+            <el-switch v-model="styleEnabled" />
+            <template v-if="styleEnabled">
+              <div class="style-presets">
+                <el-tag v-for="p in stylePresets" :key="p.label" size="small" effect="plain"
+                        class="style-tag" @click="stylePrompt = p.prompt">{{ p.label }}</el-tag>
+              </div>
+              <el-input v-model="stylePrompt" type="textarea" :rows="2" maxlength="500" show-word-limit
+                        placeholder="描述期望的翻译风格，如：古风文雅、网络流行语、正式书面…" />
+            </template>
+          </el-form-item>
           <el-form-item>
             <el-button type="primary" :loading="submitting" @click="submit">开始翻译</el-button>
           </el-form-item>
@@ -81,6 +92,7 @@
 import http from '../api/http'
 import StyleDialog from '../components/StyleDialog.vue'
 import { LANG_GROUPS } from '../constants/langs'
+import { STYLE_PRESETS } from '../constants/styles'
 
 const STATUS_TEXT = {
   PENDING: '排队中', EXTRACTING_AUDIO: '提取音频', TRANSCRIBING: '语音转文字',
@@ -99,6 +111,9 @@ export default {
       langGroups: LANG_GROUPS,
       asrProvider: 'groq',
       bilingual: false,
+      styleEnabled: false,
+      stylePrompt: '',
+      stylePresets: STYLE_PRESETS,
       submitting: false,
       tasks: [],
       timer: null,
@@ -108,12 +123,23 @@ export default {
   },
   mounted () {
     this.fetchTasks()
+    this.loadDefaultStyle()
     this.timer = setInterval(this.fetchTasks, 2000)
   },
   beforeDestroy () {
     clearInterval(this.timer)
   },
   methods: {
+    /** 设置页存过默认风格则自动带出（任务里可临时改/关，只影响本次） */
+    loadDefaultStyle () {
+      http.get('/settings').then(r => {
+        const s = r.data && r.data.stylePrompt
+        if (s) {
+          this.styleEnabled = true
+          this.stylePrompt = s
+        }
+      }).catch(() => {})
+    },
     onFileChange (file, fileList) {
       this.rawFile = file.raw
       this.fileList = fileList.slice(-1)
@@ -132,6 +158,7 @@ export default {
         fd.append('targetLang', this.targetLang)
         fd.append('asrProvider', this.asrProvider)
         fd.append('bilingual', this.bilingual)
+        fd.append('stylePrompt', this.styleEnabled ? this.stylePrompt.trim() : '')
         await http.post('/tasks', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
         this.$message.success('任务已提交')
         this.rawFile = null
@@ -208,6 +235,8 @@ export default {
   padding: 0 24px; font-size: 18px;
 }
 .body { max-width: 900px; margin: 24px auto; display: flex; flex-direction: column; gap: 20px; }
+.style-presets { margin: 6px 0; }
+.style-tag { cursor: pointer; margin-right: 6px; }
 .err { color: #f56c6c; font-size: 12px; }
 .del { color: #f56c6c; }
 </style>

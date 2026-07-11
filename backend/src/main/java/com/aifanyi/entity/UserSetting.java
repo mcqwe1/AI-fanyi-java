@@ -27,5 +27,8 @@ public class UserSetting {
     private String geminiApiKey;
     private String geminiModel;
 
+    /** 默认翻译风格提示词（三个翻译模式默认带出，任务可临时覆盖；空=无默认风格） */
+    private String stylePrompt;
+
     private LocalDateTime updatedAt;
 }

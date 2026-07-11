@@ -33,6 +33,9 @@ public final class HallucinationFilter {
             "谢谢观看", "感谢观看", "谢谢大家观看", "谢谢收看",
             "thanks for watching", "thank you for watching", "thank you so much for watching",
             "please subscribe",
+            // “晚安”家族：Whisper 对呼吸声/静音的高频幻觉（日语源尤甚，おやすみ→译成“晚安”反复出现）。
+            // 真人整句只说“晚安”的收尾口播也会被误杀——按本项目“宁可误杀收尾套话”的既定取舍处理。
+            "おやすみなさい", "おやすみ", "晚安", "good night",
     };
 
     /** 包含即判为幻觉的强特征子串（字幕组水印/频道推广）。 */

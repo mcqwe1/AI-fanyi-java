@@ -37,6 +37,9 @@ public class TranslationTask {
     private String srtPath;
     private String outputVideoPath;
 
+    /** 本任务翻译风格提示词（空=不指定风格） */
+    private String stylePrompt;
+
     private Integer progress;
     private String errorMsg;
 

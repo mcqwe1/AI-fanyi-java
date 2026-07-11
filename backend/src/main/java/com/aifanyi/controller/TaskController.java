@@ -49,10 +49,11 @@ public class TaskController {
             @RequestParam(defaultValue = "groq") String asrProvider,
             @RequestParam(required = false) String llmModel,
             @RequestParam(defaultValue = "false") boolean burnSubtitle,
-            @RequestParam(defaultValue = "false") boolean bilingual) {
+            @RequestParam(defaultValue = "false") boolean bilingual,
+            @RequestParam(required = false) String stylePrompt) {
         Long uid = SecurityUtils.currentUserId();
         Long taskId = taskService.createAndStart(file, uid, mode, projectId, sourceLang, targetLang,
-                asrProvider, llmModel, burnSubtitle, bilingual);
+                asrProvider, llmModel, burnSubtitle, bilingual, stylePrompt);
         return R.ok(new CreateTaskResp(taskId));
     }
 

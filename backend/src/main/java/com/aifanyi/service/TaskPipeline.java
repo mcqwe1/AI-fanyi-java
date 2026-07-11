@@ -89,25 +89,32 @@ public class TaskPipeline {
             }
             // 文本层反幻觉：黑名单套话 + 复读折叠（对所有 provider 生效）
             segments = HallucinationFilter.filter(segments);
-            // 丢弃静音处的幻觉字幕（Whisper 常在静音段幻觉"感谢观看/you"等）
-            List<long[]> silence = ffmpeg.detectSilenceMs(audio, -50, 0.8);
-            segments = SubtitleTimingFixer.dropSilenceHallucinations(segments, silence);
-            if (segments.isEmpty()) {
-                throw new BizException("未识别到有效语音（疑似全静音）");
-            }
-            // VAD 起点吸附：把被开场/间奏噪声拖早的字幕起点收紧到真实说话点
-            // （对所有 provider 生效；ai-service 不可用则跳过，不影响任务。
-            //   catch 只包 VAD 请求本身——吸附逻辑自身的 bug 不该被吞成一条 warn）
+            // VAD 语音区间（与 ASR 并行计算，此处 join）：非语音幻觉丢弃 + 时间轴双向对齐都靠它。
+            // ai-service 不可用则降级 ffmpeg 静音检测（只能兜底真静音处的幻觉，不做对齐）。
             List<long[]> vadRegions = null;
             try {
                 vadRegions = vadFuture.join();
             } catch (Exception e) {
-                log.warn("VAD 起点吸附跳过: {}", e.getMessage());
+                log.warn("VAD 不可用，时间轴对齐跳过、幻觉过滤退回 ffmpeg 静音检测: {}", e.getMessage());
             }
-            if (vadRegions != null) {
-                segments = SubtitleTimingFixer.snapToSpeechOnsets(segments, vadRegions);
+            if (vadRegions != null && !vadRegions.isEmpty()) {
+                // ① 与语音区间几乎零重叠的段 = 幻觉（文本无关，比黑名单更通用）
+                segments = SubtitleTimingFixer.dropNonSpeech(segments, vadRegions);
+                // ② 双向对齐：早出后移、晚出前拉、终点修剪/外扩
+                segments = SubtitleTimingFixer.alignToSpeech(segments, vadRegions);
+            } else {
+                List<long[]> silence = ffmpeg.detectSilenceMs(audio, -50, 0.8);
+                segments = SubtitleTimingFixer.dropSilenceHallucinations(segments, silence);
             }
-            // 修正时间轴：去空白、去重叠（避免下一句字幕提前出现）、兜底最短时长
+            if (segments.isEmpty()) {
+                throw new BizException("未识别到有效语音（疑似全为静音/幻觉）");
+            }
+            // ③ 补回音视频流起始偏移（抽音频丢失 start_time 差 → 轴相对视频恒定错位）
+            long avOffsetMs = ffmpeg.probeAvStartOffsetMs(video);
+            if (avOffsetMs != 0) {
+                segments = SubtitleTimingFixer.shiftAll(segments, avOffsetMs);
+            }
+            // ④ 最终兜底：去空白、去重叠（避免下一句字幕提前出现）、保证最短时长
             segments = SubtitleTimingFixer.fix(segments);
 
             List<String> sources = segments.stream().map(Segment::text).toList();
@@ -135,7 +142,8 @@ public class TaskPipeline {
             update(task, TaskStatus.TRANSLATING, 60);
             LlmConfig llmCfg = settings.effectiveTranslationLlm(task.getUserId(), kb);
             log.info("翻译使用模型: {} @ {}", llmCfg.model(), llmCfg.baseUrl());
-            List<String> targets = translator.translate(sources, task.getTargetLang(), llmCfg, glossary);
+            List<String> targets = translator.translate(sources, task.getTargetLang(), llmCfg,
+                    glossary, task.getStylePrompt());
 
             // 4. 落库字幕
             subtitleMapper.delete(Wrappers.<Subtitle>lambdaQuery().eq(Subtitle::getTaskId, taskId));

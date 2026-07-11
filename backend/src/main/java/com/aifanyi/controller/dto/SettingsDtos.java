@@ -15,11 +15,12 @@ public class SettingsDtos {
             SecretView zhipuApiKey,
             String geminiBaseUrl,
             SecretView geminiApiKey,
-            String geminiModel
+            String geminiModel,
+            String stylePrompt
     ) {
     }
 
-    /** 更新设置：仅非空字段会被写入（留空表示不修改）。 */
+    /** 更新设置：密钥类仅非空字段会被写入（留空表示不修改）；stylePrompt 传 null 不改、传值（含空串）即写入。 */
     public record UpdateSettingsReq(
             String groqApiKey,
             String llmBaseUrl,
@@ -29,7 +30,8 @@ public class SettingsDtos {
             String zhipuApiKey,
             String geminiBaseUrl,
             String geminiApiKey,
-            String geminiModel
+            String geminiModel,
+            String stylePrompt
     ) {
     }
 

@@ -50,11 +50,12 @@ public class SettingsService {
                 secret(s == null ? null : s.getZhipuApiKey()),
                 s == null ? null : s.getGeminiBaseUrl(),
                 secret(s == null ? null : s.getGeminiApiKey()),
-                s == null ? null : s.getGeminiModel()
+                s == null ? null : s.getGeminiModel(),
+                s == null ? null : s.getStylePrompt()
         );
     }
 
-    /** 更新：仅非空字段写入。 */
+    /** 更新：密钥类仅非空字段写入；stylePrompt 传 null 不改、传值（含空串）即写入（空串=清空默认风格）。 */
     public void update(Long userId, UpdateSettingsReq req) {
         UserSetting s = load(userId);
         boolean isNew = (s == null);
@@ -71,6 +72,11 @@ public class SettingsService {
         if (has(req.geminiBaseUrl())) s.setGeminiBaseUrl(req.geminiBaseUrl().trim());
         if (has(req.geminiApiKey())) s.setGeminiApiKey(req.geminiApiKey().trim());
         if (has(req.geminiModel())) s.setGeminiModel(req.geminiModel().trim());
+        if (req.stylePrompt() != null) {
+            // 非密钥字段：清空是真实需求。清空时存空串而非 null——updateById 忽略 null 字段会导致清不掉
+            String norm = TaskService.normalizeStylePrompt(req.stylePrompt());
+            s.setStylePrompt(norm == null ? "" : norm);
+        }
         if (isNew) {
             mapper.insert(s);
         } else {
@@ -118,16 +124,23 @@ public class SettingsService {
     /**
      * KB（术语表）模式的翻译配置：与抽术语用同一 Gemini 端点/模型，保证术语表遵循的一致性
      * （DeepSeek 等第三方模型偶尔不按 Gemini 建的术语表翻译）。
-     * 模型剥掉 -search 后缀——联网 grounding 只对抽术语有价值，批量翻译带上只会又慢又贵。
+     * 模型后缀改写（vertex2openai 代理约定）：
+     *  - 剥掉 -search——联网 grounding 只对抽术语有价值，批量翻译带上只会又慢又贵；
+     *  - 追加 -nothinking——把 Gemini 思考预算压到 0（pro 系代理自动用最低 128）。
+     *    实测 gemini-3-flash 同批字幕：默认思考 ~15s/批（多烧 ~1300 思考 token），关思考 ~3s/批。
      * disableThinking 固定 false（有意为之）：thinking:{type:disabled} 是 DeepSeek 系方言字段，
-     * Gemini 代理不认识，发了没意义；vertex2openai 实测不带该字段即可正常翻译。
+     * Gemini 代理不认识；关思考走上面的 -nothinking 模型名约定。
      * 并发压到 KB_MAX_CONCURRENCY——429 会被 OpenAiTranslator 静默回退为原文，宁可慢一点。
      */
     private LlmConfig effectiveKbLlm(Long userId) {
         GeminiConfig g = effectiveGemini(userId);
-        String model = g.model().endsWith("-search")
-                ? g.model().substring(0, g.model().length() - "-search".length())
-                : g.model();
+        String model = g.model();
+        if (model.endsWith("-search")) {
+            model = model.substring(0, model.length() - "-search".length());
+        }
+        if (!model.endsWith("-nothinking")) {
+            model = model + "-nothinking";
+        }
         AifanyiProperties.Llm tune = props.getLlm();
         return new LlmConfig(g.baseUrl(), g.apiKey(), model,
                 false, tune.getBatchSize(), Math.min(tune.getConcurrency(), KB_MAX_CONCURRENCY));

@@ -17,6 +17,9 @@ public class TextTranslation {
 
     private String targetLang;
 
+    /** 本次翻译风格提示词（空=未指定风格） */
+    private String stylePrompt;
+
     /** 原文摘要（列表展示用，入库时截断） */
     private String preview;
 

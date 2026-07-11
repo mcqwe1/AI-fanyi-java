@@ -28,12 +28,15 @@ public class TaskService {
     private final StorageService storage;
     private final TaskPipeline pipeline;
 
+    /** 风格提示词字符上限（与前端 textarea maxlength、DB 列宽一致）。 */
+    private static final int STYLE_PROMPT_MAX_CHARS = 500;
+
     /**
      * 创建任务、保存上传视频并异步启动流水线。
      */
     public Long createAndStart(MultipartFile file, Long userId, String mode, Long projectId,
                                String sourceLang, String targetLang, String asrProvider,
-                               String llmModel, boolean burn, boolean bilingual) {
+                               String llmModel, boolean burn, boolean bilingual, String stylePrompt) {
         if (file == null || file.isEmpty()) {
             throw new BizException("视频文件为空");
         }
@@ -48,6 +51,7 @@ public class TaskService {
         task.setLlmModel(llmModel);
         task.setBurnSubtitle(burn ? 1 : 0);
         task.setBilingual(bilingual ? 1 : 0);
+        task.setStylePrompt(normalizeStylePrompt(stylePrompt));
         task.setOriginalFilename(file.getOriginalFilename());
         task.setProgress(0);
         taskMapper.insert(task);
@@ -128,5 +132,17 @@ public class TaskService {
 
     private static boolean notBlank(String s) {
         return s != null && !s.isBlank();
+    }
+
+    /** 归一化风格提示词：空白→null（不启用），超长直接报错（与 DB 列宽一致）。 */
+    static String normalizeStylePrompt(String stylePrompt) {
+        if (stylePrompt == null || stylePrompt.isBlank()) {
+            return null;
+        }
+        String s = stylePrompt.trim();
+        if (s.length() > STYLE_PROMPT_MAX_CHARS) {
+            throw new BizException("风格提示词过长（" + s.length() + " 字，上限 " + STYLE_PROMPT_MAX_CHARS + "）");
+        }
+        return s;
     }
 }

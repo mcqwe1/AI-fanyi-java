@@ -47,17 +47,13 @@ public class OpenAiTranslator implements LlmTranslator {
     }
 
     @Override
-    public List<String> translate(List<String> sources, String targetLang, LlmConfig cfg) {
-        return translate(sources, targetLang, cfg, java.util.Map.of());
-    }
-
-    @Override
     public List<String> translate(List<String> sources, String targetLang, LlmConfig cfg,
-                                  java.util.Map<String, String> glossary) {
+                                  java.util.Map<String, String> glossary, String stylePrompt) {
         if (!StringUtils.hasText(cfg.apiKey())) {
             throw new BizException("未配置翻译模型 API Key，请在设置里填写或用环境变量");
         }
         java.util.Map<String, String> gloss = glossary == null ? java.util.Map.of() : glossary;
+        String style = StringUtils.hasText(stylePrompt) ? stylePrompt.trim() : null;
         int batchSize = Math.max(1, cfg.batchSize());
 
         List<List<String>> batches = new ArrayList<>();
@@ -67,9 +63,10 @@ public class OpenAiTranslator implements LlmTranslator {
 
         List<Future<List<String>>> futures = new ArrayList<>(batches.size());
         for (List<String> batch : batches) {
-            futures.add(pool.submit(() -> translateBatch(batch, targetLang, cfg, gloss)));
+            futures.add(pool.submit(() -> translateBatch(batch, targetLang, cfg, gloss, style)));
         }
 
+        long t0 = System.currentTimeMillis();
         List<String> out = new ArrayList<>(sources.size());
         for (int i = 0; i < futures.size(); i++) {
             try {
@@ -79,15 +76,18 @@ public class OpenAiTranslator implements LlmTranslator {
                 out.addAll(batches.get(i));
             }
         }
+        log.info("翻译完成: {} 行 / {} 批, 模型 {}, 总耗时 {}s",
+                sources.size(), batches.size(), cfg.model(),
+                String.format(java.util.Locale.ROOT, "%.1f", (System.currentTimeMillis() - t0) / 1000.0));
         return out;
     }
 
     private List<String> translateBatch(List<String> batch, String targetLang, LlmConfig cfg,
-                                        java.util.Map<String, String> glossary) {
+                                        java.util.Map<String, String> glossary, String stylePrompt) {
         int n = batch.size();
         String[] result = batch.toArray(new String[0]); // 默认=原文
         boolean[] filled = new boolean[n];
-        String sys = buildSystemPrompt(targetLang, batch, glossary);
+        String sys = buildSystemPrompt(targetLang, batch, glossary, stylePrompt);
 
         // 最多两次。只在「网络/接口异常」或「整批一条都没拿到」时才重试；
         // 模型只漏个别行（部分成功）就直接接受，剩余行保留原文——避免为几行整批重请求。
@@ -176,11 +176,18 @@ public class OpenAiTranslator implements LlmTranslator {
         return c;
     }
 
-    private String buildSystemPrompt(String targetLang, List<String> batch, java.util.Map<String, String> glossary) {
+    private String buildSystemPrompt(String targetLang, List<String> batch,
+                                     java.util.Map<String, String> glossary, String stylePrompt) {
         StringBuilder sb = new StringBuilder();
-        sb.append("你是专业的视频字幕翻译。把 lines 数组里每个对象的 text 翻译成").append(targetLang)
-                .append("。要求：忠实自然、口语化、避免翻译腔；保留专有名词。");
-        // 注入当前批次中出现的术语对照（必须遵守）
+        sb.append("你是专业的视频字幕翻译。把 lines 数组里每个对象的 text 翻译成").append(targetLang);
+        if (StringUtils.hasText(stylePrompt)) {
+            // 用户指定风格时，默认的"口语化"让位，避免与用户风格冲突
+            sb.append("。要求：忠实原意、避免翻译腔；保留专有名词。")
+                    .append("【翻译风格要求，必须遵循】").append(stylePrompt.trim()).append("。");
+        } else {
+            sb.append("。要求：忠实自然、口语化、避免翻译腔；保留专有名词。");
+        }
+        // 注入当前批次中出现的术语对照（必须遵守，优先级高于风格）
         if (glossary != null && !glossary.isEmpty()) {
             String joined = String.join("\n", batch);
             StringBuilder terms = new StringBuilder();
@@ -230,6 +237,7 @@ public class OpenAiTranslator implements LlmTranslator {
         messages.addObject().put("role", "user").put("content", user);
 
         String resp;
+        long t0 = System.currentTimeMillis();
         try {
             resp = client.post()
                     // 尾斜杠必须剥掉：FastAPI 系代理把 //chat/completions 当另一条路径直接 404
@@ -244,6 +252,15 @@ public class OpenAiTranslator implements LlmTranslator {
         }
         try {
             JsonNode root = mapper.readTree(resp);
+            // 每批耗时 + token 用量（total 远大于 prompt+completion 说明思考在烧 token）
+            JsonNode usage = root.path("usage");
+            long promptTk = usage.path("prompt_tokens").asLong(0);
+            long completionTk = usage.path("completion_tokens").asLong(0);
+            long totalTk = usage.path("total_tokens").asLong(0);
+            long hiddenTk = Math.max(0, totalTk - promptTk - completionTk);
+            log.info("LLM 批次: {}ms, 模型 {}, tokens prompt={} completion={} total={}{}",
+                    System.currentTimeMillis() - t0, cfg.model(), promptTk, completionTk, totalTk,
+                    hiddenTk > 0 ? "（思考≈" + hiddenTk + "）" : "");
             return root.path("choices").path(0).path("message").path("content").asText("");
         } catch (Exception e) {
             throw new BizException("解析 LLM 响应失败: " + e.getMessage());

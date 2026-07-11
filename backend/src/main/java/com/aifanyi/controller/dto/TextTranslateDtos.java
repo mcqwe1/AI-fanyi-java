@@ -5,7 +5,7 @@ import java.util.List;
 
 public class TextTranslateDtos {
 
-    public record TextTranslateReq(String text, String targetLang) {
+    public record TextTranslateReq(String text, String targetLang, String stylePrompt) {
     }
 
     /** 一行（或长行切出的一块）的原文/译文对。空白行占位（target 为空串）以保持段落结构。 */
@@ -39,6 +39,7 @@ public class TextTranslateDtos {
             Long id,
             String targetLang,
             String sourceText,
+            String stylePrompt,
             List<Line> lines,
             String plainTarget,
             String model,

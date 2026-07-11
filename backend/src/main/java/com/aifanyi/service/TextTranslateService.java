@@ -61,6 +61,7 @@ public class TextTranslateService {
 
     public TextTranslateResp translate(Long userId, TextTranslateReq req) {
         String targetLang = StringUtils.hasText(req.targetLang()) ? req.targetLang().trim() : "中文";
+        String stylePrompt = TaskService.normalizeStylePrompt(req.stylePrompt());
         String text = req.text() == null ? "" : req.text().replace("\r\n", "\n").replace('\r', '\n');
         if (text.strip().isEmpty()) {
             throw new BizException("请输入要翻译的文本");
@@ -101,7 +102,7 @@ public class TextTranslateService {
         log.info("文本翻译：{} 字符 / {} 块，batchSize={}，模型 {}", text.length(), toSend.size(), batch, cfg.model());
 
         long t0 = System.currentTimeMillis();
-        List<String> out = translator.translate(toSend, targetLang, cfg);
+        List<String> out = translator.translate(toSend, targetLang, cfg, java.util.Map.of(), stylePrompt);
         long elapsed = System.currentTimeMillis() - t0;
 
         // 组装逐行对照 + 统计疑似未翻译（失败批会原文返回；数字/URL 行会误报，故措辞“疑似”）
@@ -119,6 +120,7 @@ public class TextTranslateService {
         TextTranslation row = new TextTranslation();
         row.setUserId(userId);
         row.setTargetLang(targetLang);
+        row.setStylePrompt(stylePrompt);
         row.setPreview(buildPreview(text));
         row.setSourceText(text);
         row.setPlainTarget(plainTarget);
@@ -153,7 +155,8 @@ public class TextTranslateService {
     public HistoryDetail detail(Long userId, Long id) {
         TextTranslation r = getOwned(userId, id);
         List<Line> lines = readLines(r.getPairsJson());
-        return new HistoryDetail(r.getId(), r.getTargetLang(), r.getSourceText(), lines, r.getPlainTarget(),
+        return new HistoryDetail(r.getId(), r.getTargetLang(), r.getSourceText(), r.getStylePrompt(),
+                lines, r.getPlainTarget(),
                 r.getModel(), r.getElapsedMs() == null ? 0 : r.getElapsedMs(),
                 r.getUntranslatedLines() == null ? 0 : r.getUntranslatedLines(), r.getCreatedAt());
     }

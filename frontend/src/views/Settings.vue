@@ -28,7 +28,19 @@
                 </el-select>
                 <el-button :loading="fetchingModels" @click="fetchModels">拉取模型</el-button>
               </div>
-              <div class="tip">用上方 Base URL + API Key 拉取该端点支持的模型（Key 留空则用已保存的）</div>
+              <div class="tip">用上方 Base URL + API Key 拉取该端点支持的模型（Key 留空则用已保存的）；
+                走本机 Gemini 代理时建议选 -nothinking 后缀变体（关闭内置思考，翻译提速约 5 倍）</div>
+            </el-form-item>
+
+            <el-divider content-position="left">翻译风格（默认）</el-divider>
+            <el-form-item label="风格提示词">
+              <div class="style-presets">
+                <el-tag v-for="p in stylePresets" :key="p.label" size="small" effect="plain"
+                        class="style-tag" @click="form.stylePrompt = p.prompt">{{ p.label }}</el-tag>
+              </div>
+              <el-input v-model="form.stylePrompt" type="textarea" :rows="2" maxlength="500" show-word-limit
+                        placeholder="如：古风文雅，用词考究…（留空=不设默认风格）" />
+              <div class="tip">保存后作为三个翻译模式的默认风格，任务里可临时修改或关闭；清空并保存即取消默认。</div>
             </el-form-item>
 
             <el-divider content-position="left">语音识别</el-divider>
@@ -60,7 +72,8 @@
                 </el-select>
                 <el-button :loading="fetchingGeminiModels" @click="fetchGeminiModels">拉取模型</el-button>
               </div>
-              <div class="tip">-search 后缀模型＝联网搜索核实译法（本机代理支持）；Key 留空则用已保存的</div>
+              <div class="tip">-search 后缀模型＝联网搜索核实译法（仅抽术语用；KB 翻译时后端自动改用
+                -nothinking 变体关闭思考提速）；Key 留空则用已保存的</div>
             </el-form-item>
 
             <el-form-item>
@@ -116,6 +129,7 @@
 
 <script>
 import http from '../api/http'
+import { STYLE_PRESETS } from '../constants/styles'
 
 export default {
   name: 'Settings',
@@ -126,8 +140,10 @@ export default {
       form: {
         groqApiKey: '', llmBaseUrl: '', llmApiKey: '', llmModel: '',
         dashscopeApiKey: '', zhipuApiKey: '',
-        geminiBaseUrl: '', geminiApiKey: '', geminiModel: ''
+        geminiBaseUrl: '', geminiApiKey: '', geminiModel: '',
+        stylePrompt: ''
       },
+      stylePresets: STYLE_PRESETS,
       pwd: { oldPassword: '', newPassword: '', confirm: '' },
       tasks: [],
       llmModels: [],
@@ -151,6 +167,7 @@ export default {
         this.form.llmModel = r.data.llmModel || ''
         this.form.geminiBaseUrl = r.data.geminiBaseUrl || ''
         this.form.geminiModel = r.data.geminiModel || ''
+        this.form.stylePrompt = r.data.stylePrompt || ''
       } catch (e) { /* ignore */ }
     },
     loadHistory () {
@@ -229,5 +246,7 @@ export default {
 }
 .body { max-width: 900px; margin: 24px auto; padding: 0 16px; }
 .tip { color: #999; font-size: 12px; line-height: 1.6; }
+.style-presets { margin: 6px 0; }
+.style-tag { cursor: pointer; margin-right: 6px; }
 .del { color: #f56c6c; }
 </style>

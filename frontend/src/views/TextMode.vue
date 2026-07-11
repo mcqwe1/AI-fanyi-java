@@ -22,6 +22,17 @@
                       :autosize="{ minRows: 10, maxRows: 20 }" maxlength="100000" show-word-limit
                       placeholder="粘贴任意类型的文本（文章 / 对话 / 字幕 / 无换行长文均可）" />
           </el-form-item>
+          <el-form-item label="翻译风格">
+            <el-switch v-model="styleEnabled" />
+            <template v-if="styleEnabled">
+              <div class="style-presets">
+                <el-tag v-for="p in stylePresets" :key="p.label" size="small" effect="plain"
+                        class="style-tag" @click="stylePrompt = p.prompt">{{ p.label }}</el-tag>
+              </div>
+              <el-input v-model="stylePrompt" type="textarea" :rows="2" maxlength="500" show-word-limit
+                        placeholder="描述期望的翻译风格，如：古风文雅、网络流行语、正式书面…" />
+            </template>
+          </el-form-item>
           <el-form-item>
             <el-button type="primary" :loading="translating" @click="submit">开始翻译</el-button>
             <span class="hint">长文本可能需要几分钟，请勿关闭页面</span>
@@ -85,6 +96,7 @@
 <script>
 import http from '../api/http'
 import { LANG_GROUPS } from '../constants/langs'
+import { STYLE_PRESETS } from '../constants/styles'
 
 export default {
   name: 'TextMode',
@@ -93,6 +105,9 @@ export default {
       langGroups: LANG_GROUPS,
       targetLang: '中文',
       text: '',
+      styleEnabled: false,
+      stylePrompt: '',
+      stylePresets: STYLE_PRESETS,
       translating: false,
       result: null,
       view: 'plain',
@@ -101,14 +116,29 @@ export default {
   },
   mounted () {
     this.fetchHistory()
+    this.loadDefaultStyle()
   },
   methods: {
+    /** 设置页存过默认风格则自动带出（本次可临时改/关） */
+    loadDefaultStyle () {
+      http.get('/settings').then(r => {
+        const s = r.data && r.data.stylePrompt
+        if (s) {
+          this.styleEnabled = true
+          this.stylePrompt = s
+        }
+      }).catch(() => {})
+    },
     async submit () {
       if (!this.text.trim()) return this.$message.warning('请输入要翻译的文本')
       this.translating = true
       this.result = null
       try {
-        const r = await http.post('/translate/text', { text: this.text, targetLang: this.targetLang })
+        const r = await http.post('/translate/text', {
+          text: this.text,
+          targetLang: this.targetLang,
+          stylePrompt: this.styleEnabled ? this.stylePrompt.trim() : ''
+        })
         this.result = r.data
         this.view = 'plain'
         this.fetchHistory()
@@ -158,8 +188,10 @@ export default {
         const d = await this.fetchDetail(id)
         this.text = d.sourceText
         this.targetLang = d.targetLang
+        this.styleEnabled = !!d.stylePrompt
+        this.stylePrompt = d.stylePrompt || ''
         window.scrollTo({ top: 0, behavior: 'smooth' })
-        this.$message.info('原文已回填，可修改目标语言后重新翻译')
+        this.$message.info('原文已回填，可修改目标语言/风格后重新翻译')
       } catch (e) { /* 拦截器已提示 */ }
     },
     removeHistory (row) {
@@ -205,6 +237,8 @@ export default {
 }
 .body { max-width: 900px; margin: 24px auto; display: flex; flex-direction: column; gap: 20px; }
 .hint { margin-left: 12px; color: #999; font-size: 12px; }
+.style-presets { margin: 6px 0; }
+.style-tag { cursor: pointer; margin-right: 6px; }
 .result-header { display: flex; align-items: center; justify-content: space-between; }
 .meta { color: #888; font-size: 12px; margin-bottom: 10px; display: flex; gap: 16px; }
 .meta .warn { color: #e6a23c; }

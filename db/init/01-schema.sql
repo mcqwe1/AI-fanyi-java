@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS `translation_task` (
   `audio_path`        VARCHAR(500) DEFAULT NULL,
   `srt_path`          VARCHAR(500) DEFAULT NULL,
   `output_video_path` VARCHAR(500) DEFAULT NULL,
+  `style_prompt`      VARCHAR(500) DEFAULT NULL COMMENT '本任务翻译风格提示词',
   `progress`          INT          NOT NULL DEFAULT 0,
   `error_msg`         VARCHAR(1000) DEFAULT NULL,
   `deleted`           TINYINT      NOT NULL DEFAULT 0,
@@ -71,6 +72,7 @@ CREATE TABLE IF NOT EXISTS `user_setting` (
   `gemini_base_url`   VARCHAR(255) DEFAULT NULL,
   `gemini_api_key`    VARCHAR(255) DEFAULT NULL,
   `gemini_model`      VARCHAR(128) DEFAULT NULL,
+  `style_prompt`      VARCHAR(500) DEFAULT NULL COMMENT '默认翻译风格提示词',
   `updated_at`        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户设置/密钥';
@@ -111,6 +113,7 @@ CREATE TABLE IF NOT EXISTS `text_translation` (
   `id`                 BIGINT       NOT NULL AUTO_INCREMENT,
   `user_id`            BIGINT       NOT NULL,
   `target_lang`        VARCHAR(50)  NOT NULL DEFAULT '中文',
+  `style_prompt`       VARCHAR(500) DEFAULT NULL COMMENT '本次翻译风格提示词',
   `preview`            VARCHAR(200) DEFAULT NULL COMMENT '原文摘要（列表展示用，入库时截断）',
   `source_text`        MEDIUMTEXT   NOT NULL COMMENT '原始输入全文',
   `plain_target`       MEDIUMTEXT   COMMENT '纯译文（按原始行结构还原）',

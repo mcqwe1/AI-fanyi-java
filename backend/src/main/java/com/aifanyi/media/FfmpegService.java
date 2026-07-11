@@ -106,6 +106,46 @@ public class FfmpegService {
     }
 
     /**
+     * 探测音频流相对视频流的起始偏移（毫秒）= audio.start_time - video.start_time。
+     * 抽出的纯音频文件丢失了容器里的这一偏移，ASR 时间戳需整体加回该值，
+     * 否则字幕相对视频恒定提前/滞后（部分 TS/带 edit list 的 MP4 会有几百毫秒到秒级偏移）。
+     * 任一流缺失或 start_time 不可用（N/A）按 0；|offset|<50ms 视为无偏移；
+     * >30s 视为容器脏数据，忽略并告警。
+     */
+    public long probeAvStartOffsetMs(Path video) {
+        Double a = probeStreamStartSec(video, "a:0");
+        Double v = probeStreamStartSec(video, "v:0");
+        if (a == null || v == null) {
+            return 0;
+        }
+        long off = Math.round((a - v) * 1000);
+        if (Math.abs(off) < 50) {
+            return 0;
+        }
+        if (Math.abs(off) > 30_000) {
+            log.warn("音视频流起始偏移异常({}ms)，疑似容器脏数据，忽略: {}", off, video.getFileName());
+            return 0;
+        }
+        log.info("检测到音视频流起始偏移 {}ms（audio {}s / video {}s），字幕轴将整体平移", off, a, v);
+        return off;
+    }
+
+    /** 探测单个流的 start_time（秒）；流缺失或值为 N/A 返回 null。 */
+    private Double probeStreamStartSec(Path video, String streamSelector) {
+        List<String> cmd = List.of(
+                ffprobe, "-v", "error", "-select_streams", streamSelector,
+                "-show_entries", "stream=start_time",
+                "-of", "csv=p=0", video.toString()
+        );
+        String out = runCapture(cmd, 30, TimeUnit.SECONDS).trim();
+        try {
+            return Double.parseDouble(out.split("\\s+")[0]);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
      * 用 silencedetect 检测静音区间，返回 [startMs, endMs] 列表。
      * 用于丢弃 Whisper 在静音处的幻觉字幕。
      *
