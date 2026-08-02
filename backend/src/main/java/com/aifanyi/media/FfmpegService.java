@@ -223,6 +223,110 @@ public class FfmpegService {
         return outJpg;
     }
 
+    // ---- TTS 配音：片段解码与变速 ----
+    // 拼轨在 WavTrackAssembler 里纯 Java 完成；ffmpeg 只负责把 TTS 返回的音频
+    // 解码成统一规格的 PCM WAV（时长采样级精确，无 mp3 帧量化/编码器延迟漂移）。
+
+    /**
+     * 把 TTS 返回的音频解码为 44.1kHz 单声道 16bit PCM WAV（配音拼轨统一中间格式），
+     * 并裁掉首尾静音留白。
+     * TTS 端点（edge-tts 实测首 ~180ms / 尾 ~590ms）在语音前后附带的静音，若原样拼进轨道：
+     *  ① 首部留白 = 配音比字幕晚出的固定偏差；② 尾部留白白占槽位，逼出不必要的变速压缩。
+     * 裁剪阈值 -50dB 与 detectSilenceMs 一致（只削真静音，气声/轻声不受影响）。
+     */
+    public Path decodeToWavMono44k(Path in, Path out) {
+        List<String> cmd = List.of(
+                ffmpeg, "-y",
+                "-i", in.toString(),
+                "-af", TRIM_SILENCE_FILTER,
+                "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le",
+                out.toString()
+        );
+        run(cmd, null, 5, TimeUnit.MINUTES, null);
+        return out;
+    }
+
+    /** 掐头去尾的静音裁剪：正向削首部，areverse 反转后再削一次即削掉尾部，再转回来。 */
+    private static final String TRIM_SILENCE_FILTER =
+            "silenceremove=start_periods=1:start_silence=0:start_threshold=-50dB,"
+                    + "areverse,"
+                    + "silenceremove=start_periods=1:start_silence=0:start_threshold=-50dB,"
+                    + "areverse";
+
+    /** WAV 变速（atempo 保音高不变调），用于把超出字幕槽位的配音行压回槽内。 */
+    public Path atempoWav(Path in, Path out, double tempo) {
+        List<String> cmd = List.of(
+                ffmpeg, "-y",
+                "-i", in.toString(),
+                "-af", "atempo=" + String.format(java.util.Locale.ROOT, "%.4f", tempo),
+                "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le",
+                out.toString()
+        );
+        run(cmd, null, 5, TimeUnit.MINUTES, null);
+        return out;
+    }
+
+    /** 视频是否含音频流（决定「保留原声」是否可用）。 */
+    public boolean probeHasAudio(Path video) {
+        List<String> cmd = List.of(
+                ffprobe, "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0", video.toString()
+        );
+        return runCapture(cmd, 30, TimeUnit.SECONDS).trim().contains("audio");
+    }
+
+    /**
+     * 把配音轨混入视频（视频流直拷不重编码）。
+     * keepOriginalBg=false：配音直接替换原声；true：原声压到 15% 音量做背景与配音混合。
+     *
+     * @param totalSec   视频总时长（秒），用于进度；<=0 不报进度
+     * @param onProgress 进度回调（0~99），可为 null
+     */
+    public Path muxAudioIntoVideo(Path video, Path dubAudio, Path out,
+                                  boolean keepOriginalBg, double totalSec, IntConsumer onProgress) {
+        List<String> cmd;
+        if (keepOriginalBg) {
+            cmd = List.of(
+                    ffmpeg, "-y",
+                    "-i", video.toString(),
+                    "-i", dubAudio.toString(),
+                    "-filter_complex",
+                    "[0:a]volume=0.15[bg];[1:a][bg]amix=inputs=2:duration=first:dropout_transition=0[mix]",
+                    "-map", "0:v", "-map", "[mix]",
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                    "-shortest",
+                    out.toString()
+            );
+        } else {
+            cmd = List.of(
+                    ffmpeg, "-y",
+                    "-i", video.toString(),
+                    "-i", dubAudio.toString(),
+                    "-map", "0:v", "-map", "1:a",
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                    "-shortest",
+                    out.toString()
+            );
+        }
+        final int[] last = {0};
+        Consumer<String> onLine = (onProgress == null || totalSec <= 0) ? null : line -> {
+            Matcher m = TIME_PATTERN.matcher(line);
+            if (m.find()) {
+                double sec = Integer.parseInt(m.group(1)) * 3600
+                        + Integer.parseInt(m.group(2)) * 60
+                        + Double.parseDouble(m.group(3));
+                int pct = (int) Math.min(99, sec / totalSec * 100);
+                if (pct >= last[0] + 2) {
+                    last[0] = pct;
+                    onProgress.accept(pct);
+                }
+            }
+        };
+        run(cmd, null, 120, TimeUnit.MINUTES, onLine);
+        return out;
+    }
+
     // ---- 内部执行 ----
 
     private void run(List<String> cmd, Path workDir, long timeout, TimeUnit unit, Consumer<String> onLine) {

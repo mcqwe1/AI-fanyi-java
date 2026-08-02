@@ -26,4 +26,12 @@ public class KbDtos {
                                 String category, String note, Integer enabled) {
         }
     }
+
+    /** 批量移动/复制术语到另一系列项目。mode: move=移动（改归属）/ copy=复制（原项目保留）。 */
+    public record TransferTermsReq(List<Long> termIds, Long targetProjectId, String mode) {
+    }
+
+    /** 批量删除术语。 */
+    public record BatchDeleteTermsReq(List<Long> termIds) {
+    }
 }

@@ -1,10 +1,12 @@
 package com.aifanyi.controller;
 
 import com.aifanyi.common.R;
+import com.aifanyi.controller.dto.KbDtos.BatchDeleteTermsReq;
 import com.aifanyi.controller.dto.KbDtos.CreateProjectReq;
 import com.aifanyi.controller.dto.KbDtos.ProjectVO;
 import com.aifanyi.controller.dto.KbDtos.SaveTermsReq;
 import com.aifanyi.controller.dto.KbDtos.TermVO;
+import com.aifanyi.controller.dto.KbDtos.TransferTermsReq;
 import com.aifanyi.security.SecurityUtils;
 import com.aifanyi.service.KbService;
 import lombok.RequiredArgsConstructor;
@@ -55,5 +57,19 @@ public class KbController {
     public R<Void> deleteTerm(@PathVariable Long termId) {
         kbService.deleteTerm(SecurityUtils.currentUserId(), termId);
         return R.ok();
+    }
+
+    /** 批量移动/复制术语到另一系列项目，返回实际处理条数。 */
+    @PostMapping("/terms/transfer")
+    public R<Map<String, Integer>> transferTerms(@RequestBody TransferTermsReq req) {
+        int n = kbService.transferTerms(SecurityUtils.currentUserId(), req);
+        return R.ok(Map.of("count", n));
+    }
+
+    /** 批量删除术语，返回实际删除条数。 */
+    @PostMapping("/terms/batch-delete")
+    public R<Map<String, Integer>> batchDeleteTerms(@RequestBody BatchDeleteTermsReq req) {
+        int n = kbService.batchDeleteTerms(SecurityUtils.currentUserId(), req);
+        return R.ok(Map.of("count", n));
     }
 }

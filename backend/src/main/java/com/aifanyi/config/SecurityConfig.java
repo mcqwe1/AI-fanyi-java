@@ -30,8 +30,10 @@ public class SecurityConfig {
                 .cors(cors -> {})
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/api/auth/**", "/actuator/**", "/error").permitAll()
-                        .anyRequest().authenticated()
+                        .requestMatchers("/api/auth/**", "/error").permitAll()
+                        // API 一律鉴权;其余（内嵌前端静态资源 / index.html / assets）放行
+                        .requestMatchers("/api/**").authenticated()
+                        .anyRequest().permitAll()
                 )
                 .exceptionHandling(e -> e.authenticationEntryPoint(authEntryPoint))
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);

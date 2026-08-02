@@ -50,7 +50,7 @@ public class BurnService {
     }
 
     /** 异步把字幕烧录进视频。 */
-    @Async("taskExecutor")
+    @Async("mediaExecutor")
     public void burnAsync(Long taskId, SubtitleStyle style) {
         TranslationTask task = taskMapper.selectById(taskId);
         if (task == null) {

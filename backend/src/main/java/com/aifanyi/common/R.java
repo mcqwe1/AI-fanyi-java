@@ -34,8 +34,4 @@ public class R<T> implements Serializable {
     public static <T> R<T> fail(int code, String msg) {
         return new R<>(code, msg, null);
     }
-
-    public static <T> R<T> fail(String msg) {
-        return new R<>(500, msg, null);
-    }
 }

@@ -57,18 +57,22 @@ public class GeminiClient {
      * 联网从转写文本中抽取需统一译法的术语（人名/地名/作品名/组织名/角色名等）。
      * 长转写自动切块并行抽取并按 source 去重。
      *
-     * @param transcript 整段转写文本
-     * @param srcLang    源语言
-     * @param tgtLang    目标语言
-     * @param cfg        Gemini 有效配置（base/key/model，均来自用户设置页）
+     * @param transcript     整段转写文本
+     * @param srcLang        源语言
+     * @param tgtLang        目标语言
+     * @param cfg            Gemini 有效配置（base/key/model，均来自用户设置页）
+     * @param promptTemplate 自定义系统提示词模板（用户在设置页填写）；空则用内置 {@link #defaultTermPrompt}。
+     *                       支持占位符 {sourceLang}/{targetLang}；转写文本始终作为 user 消息附上，
+     *                       模板里的 {transcript} 占位符（如有）也会被替换。
      */
-    public List<TermCandidate> extractTerms(String transcript, String srcLang, String tgtLang, GeminiConfig cfg) {
+    public List<TermCandidate> extractTerms(String transcript, String srcLang, String tgtLang,
+                                            GeminiConfig cfg, String promptTemplate) {
         if (cfg == null || !StringUtils.hasText(cfg.apiKey())) {
             throw new BizException("Gemini 未配置，请在「设置 → API 密钥」填写");
         }
         List<String> chunks = splitByChars(transcript, CHUNK_CHARS);
         if (chunks.size() <= 1) {
-            return extractOne(transcript, srcLang, tgtLang, cfg);
+            return extractOne(transcript, srcLang, tgtLang, cfg, promptTemplate);
         }
 
         log.info("KB 抽术语：转写 {} 字，切 {} 块并行抽取", transcript.length(), chunks.size());
@@ -76,7 +80,7 @@ public class GeminiClient {
         try {
             List<Future<List<TermCandidate>>> futures = new ArrayList<>();
             for (String c : chunks) {
-                futures.add(pool.submit(() -> extractOne(c, srcLang, tgtLang, cfg)));
+                futures.add(pool.submit(() -> extractOne(c, srcLang, tgtLang, cfg, promptTemplate)));
             }
             // 按 source 去重（保留先出现的）；upsert 还会再按已有库去重一次
             Map<String, TermCandidate> merged = new LinkedHashMap<>();
@@ -118,34 +122,22 @@ public class GeminiClient {
         return chunks;
     }
 
-    /** 对一段（块）转写做一次联网抽取。 */
-    private List<TermCandidate> extractOne(String transcript, String srcLang, String tgtLang, GeminiConfig cfg) {
+    /** 对一段（块）转写做一次联网抽取。promptTemplate 为空则用内置模板；两者同用占位符机制。 */
+    private List<TermCandidate> extractOne(String transcript, String srcLang, String tgtLang,
+                                           GeminiConfig cfg, String promptTemplate) {
         String url = cfg.baseUrl().replaceAll("/+$", "") + "/chat/completions";
 
-        String sys = "你是字幕翻译的术语顾问。给你一段" + srcLang + "语音的转写文本。"
-                + "请抽取其中需要在翻译成" + tgtLang + "时【统一且正确】译法的术语，只限以下六大类："
-                + "①人名；②地名与地址；③机构组织与品牌名；④作品名/标题；"
-                + "⑤文化专有项（食物、习俗、节日等）；⑥科技术语中的专有名词（如阿尔兹海默症、CRISPR）。"
-                + "普通词汇、常见动词形容词不要列。"
-                + "【译法语言铁律】每个术语的 target 必须是【" + tgtLang + "】，是给" + tgtLang + "观众看的。"
-                + "严禁用英文、罗马音或源语言原文直接当译法——除非该专名在" + tgtLang + "受众里本就通用其英文/原文写法"
-                + "（如 Sony、iPhone、官方英文名）。"
-                + "【怎么定译法】① 先联网搜索该专名在" + tgtLang + "里有没有官方/通用译名，有就用"
-                + "（例：日文人名「本多」→「本多」而非「本田」）；"
-                + "② 查不到现成译名时，自己产出" + tgtLang + "译法：含义清楚的优先意译；含义不清或属生造词的就"
-                + "音译成" + tgtLang + "文字，并保留通用类别词。绝不能因为“没有现成译名”就退回英文/原文。"
-                + "（示例，当目标语言为中文时：イヤポッコクラブ→「耳波扣俱乐部」，不要写成 Ear Poko Club；"
-                + "リアちゃん→「莉亚酱」；〜さん→「〜先生/小姐」。）"
-                + "只返回 JSON：{\"terms\":[{\"source\":\"原文\",\"target\":\"" + tgtLang + "译法\","
-                + "\"category\":\"六大类之一的中文名（人名/地名与地址/机构组织与品牌/作品名/文化专有项/科技专名）\","
-                + "\"note\":\"简短依据，注明 官方译名/意译/音译\"}]}，不要输出任何额外文字、解释或 markdown 代码块。";
+        String tmpl = StringUtils.hasText(promptTemplate) ? promptTemplate : defaultTermPrompt();
+        // 统一替换占位符；模板含 {transcript} 则就地注入转写，同时 user 消息始终附一份兜底
+        String sys = fillPlaceholders(tmpl, srcLang, tgtLang, transcript);
+        String userMsg = "转写文本：\n" + transcript;
 
         ObjectNode req = mapper.createObjectNode();
         req.put("model", cfg.model());
         req.put("temperature", 0.2);
         ArrayNode messages = req.putArray("messages");
         messages.addObject().put("role", "system").put("content", sys);
-        messages.addObject().put("role", "user").put("content", "转写文本：\n" + transcript);
+        messages.addObject().put("role", "user").put("content", userMsg);
 
         String resp;
         try {
@@ -160,6 +152,44 @@ public class GeminiClient {
             throw new BizException("Gemini 请求失败: " + e.getMessage());
         }
         return parse(resp);
+    }
+
+    /**
+     * 内置术语抽取提示词模板（2026-07-15 结构化重写）。
+     * 占位符与用户自定义模板同一套规则：{sourceLang}/{targetLang} 必替换，
+     * {transcript}（可选）替换为转写全文；不写转写也会作为 user 消息附上。
+     * public 供设置页原样展示，用户可复制为自定义起点。
+     */
+    public static String defaultTermPrompt() {
+        return """
+                你是专业的字幕翻译术语顾问。任务：从一段{sourceLang}语音的转写文本中，找出翻译成{targetLang}时必须【全篇统一、译法正确】的专有名词，产出术语表。
+
+                【只收录以下六类】
+                1. 人名（含昵称、艺名、角色名）
+                2. 地名与地址
+                3. 机构、组织、品牌名
+                4. 作品名/标题（影视、歌曲、书籍、游戏、节目等）
+                5. 文化专有项（特色食物、习俗、节日等）
+                6. 科技专名（疾病、技术、产品型号等，如 CRISPR、阿尔兹海默症）
+                【不要收录】普通名词、动词、形容词、常见短语。只有"反复出现且容易译错/译乱"的专名才值得进表；宁缺毋滥。
+
+                【译法怎么定——按顺序执行】
+                ① 先联网核实：该专名在{targetLang}里是否已有官方或公认通用译名，有就照用（例：Einstein 在中文的公认译名是「爱因斯坦」，直接采用）。切勿对已有通用译名的专名自创新译，也不要把同音/近形的其他专名混为一谈——转写里写的是谁就查谁。
+                ② 查不到现成译名：含义清楚的优先意译（如虚构社团 Moonlight Bakery Club →「月光烘焙社」）；生造词或含义不明的，音译成{targetLang}文字；人名昵称的敬称后缀按{targetLang}习惯转换（如日语「〜さん」→「〜先生/小姐」）。
+                ③ 铁律：target 必须写成{targetLang}，是给{targetLang}观众看的。严禁把英文、罗马音或源语言原文直接当译法——除非该专名在{targetLang}受众中本就通用其原文写法（如 Sony、iPhone、官方英文名）。
+
+                【输出格式】只返回如下 JSON，不要任何解释、前后缀或 markdown 代码块：
+                {"terms":[{"source":"原文","target":"{targetLang}译法","category":"人名/地名与地址/机构组织与品牌/作品名/文化专有项/科技专名 之一","note":"一句话依据，注明 官方译名/意译/音译"}]}""";
+    }
+
+    /** 把模板里的占位符替换为实际值；transcript 为 null 时不替换 {transcript}。 */
+    private static String fillPlaceholders(String tmpl, String srcLang, String tgtLang, String transcript) {
+        String out = tmpl.replace("{sourceLang}", srcLang == null ? "" : srcLang)
+                .replace("{targetLang}", tgtLang == null ? "" : tgtLang);
+        if (transcript != null) {
+            out = out.replace("{transcript}", transcript);
+        }
+        return out;
     }
 
     private List<TermCandidate> parse(String resp) {

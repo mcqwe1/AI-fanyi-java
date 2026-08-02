@@ -47,18 +47,35 @@ public final class SubtitleTimingFixer {
     private static final long DROP_WINDOW_BEFORE_MS = BACK_SNAP_MAX_MS;
     /** 重叠统计窗口向后放宽量 */
     private static final long DROP_WINDOW_AFTER_MS = 400;
-    /** 窗口内语音重叠低于此值判为幻觉（VAD threshold=0.3 已很宽松，真实语音不会低于它） */
+    /** 短段判幻觉的重叠下限：短促套话最像幻觉，用宽标准 */
     private static final long DROP_MIN_OVERLAP_MS = 250;
-    /** 超过此时长的段只在完全零重叠时才丢（长段幻觉少、误删代价大） */
+    /** 短段上限：此时长以内允许按「重叠不足」删；2~6s 之间只在完全零重叠时删 */
+    private static final long DROP_SHORT_MS = 2000;
+    /** 超过此时长一律不删：ASR 能转出连贯长句，本身就是比 VAD 更强的语音证据 */
     private static final long DROP_MAX_DURATION_MS = 6000;
+    /** 熔断线：待删比例超过它 = VAD 对该素材不可靠（耳语/气声内容），整体放弃删除 */
+    private static final double DROP_FUSE_RATIO = 0.25;
+    /** 熔断的最小样本量：段太少时比例没有统计意义 */
+    private static final int DROP_FUSE_MIN_SEGS = 20;
 
     private SubtitleTimingFixer() {
     }
 
     /**
      * 丢弃落在非语音区域的字幕段（文本无关的反幻觉）：Whisper 对呼吸/敲击/静音常幻觉出
-     * “おやすみなさい/晚安/感谢观看”等整句。真实语音在 VAD（threshold=0.3，宽松）下
-     * 必有明显重叠；把段的时间窗前后放宽（容忍时间戳标偏）后仍几乎无语音重叠 → 幻觉。
+     * “おやすみなさい/晚安/感谢观看”等整句，这类段在 VAD 下几乎无语音重叠。
+     *
+     * <p><b>但 VAD 说「没有语音」不是铁证</b>——Silero 靠声带振动特征识别，对耳语/气声
+     * 内容几乎失聪（2026-08-01 实锤：轻声直播 326 条被判掉 190 条、占 58%，全是真台词，
+     * Groq 转写得一清二楚）。所以删除是分级的、带熔断的：
+     * <ul>
+     *   <li>≤2s 短段：重叠不足 {@link #DROP_MIN_OVERLAP_MS} 才删（短促套话最像幻觉）；</li>
+     *   <li>2~6s：完全零重叠才删；</li>
+     *   <li>>6s 一律不删——ASR 能转出连贯长句，本身就是比 VAD 更强的语音证据；</li>
+     *   <li><b>熔断</b>：待删比例超 {@link #DROP_FUSE_RATIO} 说明不是字幕有鬼、
+     *       是 VAD 对该素材失聪，整体放弃删除，一条不动。</li>
+     * </ul>
+     * 原则：宁可多留一句幻觉（还有黑名单与复读折叠兜着），不可错杀一句台词。
      */
     public static List<Segment> dropNonSpeech(List<Segment> segs, List<long[]> regionsMs) {
         if (segs == null || segs.isEmpty() || regionsMs == null || regionsMs.isEmpty()) {
@@ -70,18 +87,37 @@ public final class SubtitleTimingFixer {
             long overlap = overlapMs(regionsMs,
                     s.startMs() - DROP_WINDOW_BEFORE_MS, s.endMs() + DROP_WINDOW_AFTER_MS);
             long dur = s.endMs() - s.startMs();
-            boolean drop = dur <= DROP_MAX_DURATION_MS
-                    ? overlap < DROP_MIN_OVERLAP_MS
-                    : overlap == 0;
+            boolean drop;
+            if (dur > DROP_MAX_DURATION_MS) {
+                drop = false;                          // 长句免死
+            } else if (dur > DROP_SHORT_MS) {
+                drop = overlap == 0;
+            } else {
+                drop = overlap < DROP_MIN_OVERLAP_MS;
+            }
             if (drop) {
-                dropped.add(s.text());
+                dropped.add(String.format("%s~%s 时长%dms 重叠%dms 「%s」",
+                        ts(s.startMs()), ts(s.endMs()), dur, overlap, s.text()));
             } else {
                 out.add(s);
             }
         }
+        // 熔断：大面积「VAD 无语音」而 ASR 有连贯产出 → 前提不成立，全体放行
+        if (segs.size() >= DROP_FUSE_MIN_SEGS
+                && dropped.size() > segs.size() * DROP_FUSE_RATIO) {
+            log.warn("VAD 非语音过滤熔断：{}/{} 条被判无语音（超过 {}%）——"
+                            + "判定 VAD 对该素材不可靠（耳语/轻声内容常见），本次跳过零证据删除，一条不删",
+                    dropped.size(), segs.size(), Math.round(DROP_FUSE_RATIO * 100));
+            return segs;
+        }
         if (!dropped.isEmpty()) {
-            List<String> sample = dropped.subList(0, Math.min(5, dropped.size()));
-            log.info("VAD 非语音过滤：丢弃 {} 条疑似幻觉字幕，如 {}", dropped.size(), sample);
+            // 丢弃明细全量打印（漏翻排查的唯一线索：轴一起没了，事后无从追溯）。
+            // 每条带时间戳与实际重叠量，便于判断是真幻觉还是短促台词被误杀。
+            log.info("VAD 非语音过滤：丢弃 {} 条（{} → {} 条）",
+                    dropped.size(), segs.size(), out.size());
+            for (String d : dropped) {
+                log.info("  [丢弃-VAD] {}", d);
+            }
         }
         return out;
     }
@@ -111,6 +147,7 @@ public final class SubtitleTimingFixer {
         }
         final long shortMs = 3000;
         List<Segment> out = new ArrayList<>();
+        List<String> dropped = new ArrayList<>();
         for (Segment s : segs) {
             long start = s.startMs();
             long end = s.endMs();
@@ -127,9 +164,24 @@ public final class SubtitleTimingFixer {
             }
             if (!drop) {
                 out.add(s);
+            } else {
+                dropped.add(String.format("%s~%s 时长%dms 「%s」",
+                        ts(s.startMs()), ts(s.endMs()), dur, s.text()));
+            }
+        }
+        if (!dropped.isEmpty()) {
+            log.info("静音过滤（ffmpeg 兜底）：丢弃 {} 条（{} → {} 条）",
+                    dropped.size(), segs.size(), out.size());
+            for (String d : dropped) {
+                log.info("  [丢弃-静音] {}", d);
             }
         }
         return out;
+    }
+
+    /** 毫秒转 mm:ss.SSS，方便对着视频核查。 */
+    public static String ts(long ms) {
+        return String.format("%02d:%02d.%03d", ms / 60000, (ms / 1000) % 60, ms % 1000);
     }
 
     /**

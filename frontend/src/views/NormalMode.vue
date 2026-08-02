@@ -1,108 +1,78 @@
 <template>
-  <div class="page">
-    <div class="topbar">
-      <el-button type="text" style="color:#fff" icon="el-icon-back" @click="$router.push('/')">返回</el-button>
-      <span>普通 AI 视频翻译</span>
-      <span />
+  <div class="create-page">
+    <div class="page-head">
+      <h2>{{ isAudio ? '音频AI翻译' : '普通AI视频翻译' }}</h2>
+      <p>{{ isAudio ? '上传音频，AI 识别并翻译，产出 SRT 字幕与译文 TXT'
+                    : '上传视频，AI 自动识别语音并翻译' }}</p>
     </div>
 
-    <div class="body">
-      <el-card class="panel">
-        <div slot="header">新建翻译任务</div>
-        <el-form label-width="90px">
-          <el-form-item label="视频文件">
-            <el-upload action="#" :auto-upload="false" :limit="1" :on-change="onFileChange"
-                       :on-remove="onRemove" :file-list="fileList" accept="video/*">
-              <el-button icon="el-icon-upload2">选择视频</el-button>
-            </el-upload>
-          </el-form-item>
-          <el-form-item label="目标语言">
-            <el-select v-model="targetLang" filterable style="width:100%">
-              <el-option-group v-for="g in langGroups" :key="g.label" :label="g.label">
-                <el-option v-for="l in g.langs" :key="l" :label="l" :value="l" />
-              </el-option-group>
-            </el-select>
-          </el-form-item>
-          <el-form-item label="语音识别">
-            <el-select v-model="asrProvider" style="width:100%">
-              <el-option label="Groq（推荐使用）" value="groq" />
-              <el-option label="Groq Turbo（更快，稍逊）" value="groq-turbo" />
-              <el-option label="Qwen3-ASR（待接入，需阿里 Key）" value="qwen" disabled />
-              <el-option label="GLM-ASR（待接入，需智谱余额）" value="glm" disabled />
-              <el-option-group label="本地 Whisper（GPU/CPU）">
-                <el-option label="本地 base（最快/质量较低）" value="local-base" />
-                <el-option label="本地 small" value="local-small" />
-                <el-option label="本地 medium" value="local-medium" />
-                <el-option label="本地 large-v3（最准/较慢）" value="local-large-v3" />
-              </el-option-group>
-            </el-select>
-          </el-form-item>
-          <el-form-item label="选项">
-            <el-checkbox v-model="bilingual">双语字幕</el-checkbox>
-          </el-form-item>
-          <el-form-item label="翻译风格">
-            <el-switch v-model="styleEnabled" />
-            <template v-if="styleEnabled">
-              <div class="style-presets">
-                <el-tag v-for="p in stylePresets" :key="p.label" size="small" effect="plain"
-                        class="style-tag" @click="stylePrompt = p.prompt">{{ p.label }}</el-tag>
-              </div>
-              <el-input v-model="stylePrompt" type="textarea" :rows="2" maxlength="500" show-word-limit
-                        placeholder="描述期望的翻译风格，如：古风文雅、网络流行语、正式书面…" />
-            </template>
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" :loading="submitting" @click="submit">开始翻译</el-button>
-          </el-form-item>
-        </el-form>
-      </el-card>
-
-      <el-card class="panel">
-        <div slot="header">我的任务</div>
-        <el-table :data="tasks" size="small" stripe>
-          <el-table-column prop="id" label="ID" width="60" />
-          <el-table-column prop="originalFilename" label="文件" show-overflow-tooltip />
-          <el-table-column prop="targetLang" label="目标语言" width="90" />
-          <el-table-column label="状态" width="200">
-            <template slot-scope="{ row }">
-              <el-tag size="mini" :type="tagType(row.status)">{{ statusText(row.status) }}</el-tag>
-              <el-progress v-if="!isFinal(row.status)" :percentage="row.progress || 0" :stroke-width="6" />
-              <span v-if="row.status === 'FAILED'" class="err">{{ row.errorMsg }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="360">
-            <template slot-scope="{ row }">
-              <el-button v-if="row.status === 'DONE'" type="text" @click="download(row.id)">下载SRT</el-button>
-              <el-button v-if="row.status === 'DONE' || row.status === 'BURNING'" type="text"
-                         @click="openStyle(row.id)">字幕样式/烧录</el-button>
-              <el-button v-if="row.hasVideo" type="text" @click="downloadVideo(row.id)">下载视频</el-button>
-              <el-button v-if="row.status === 'DONE' || row.status === 'FAILED'" type="text" @click="retry(row)">重试</el-button>
-              <el-button type="text" class="del" @click="remove(row)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </el-card>
-    </div>
-
-    <style-dialog :visible.sync="styleVisible" :task-id="styleTaskId" @burned="fetchTasks" />
+    <el-card class="form-card">
+      <el-form label-width="90px">
+        <el-form-item :label="isAudio ? '音频文件' : '视频文件'">
+          <el-upload action="#" :auto-upload="false" :limit="1" :on-change="onFileChange"
+                     :on-remove="onRemove" :file-list="fileList" drag :accept="accept">
+            <i class="el-icon-upload" />
+            <div class="el-upload__text">拖拽文件到这里，或 <em>点击选择</em></div>
+            <div slot="tip" class="el-upload__tip">
+              {{ isAudio ? '支持 MP3 / WAV / M4A / AAC / FLAC / OGG 等' : '支持 MP4 / MKV / MOV / AVI / WebM 等（也可直接上传音频）' }}
+            </div>
+          </el-upload>
+        </el-form-item>
+        <el-form-item label="目标语言">
+          <el-select v-model="targetLang" filterable style="width:100%">
+            <el-option-group v-for="g in langGroups" :key="g.label" :label="g.label">
+              <el-option v-for="l in g.langs" :key="l" :label="l" :value="l" />
+            </el-option-group>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="语音识别">
+          <el-select v-model="asrProvider" style="width:100%">
+            <el-option label="Groq（需要使用魔法，使用large-v3模型进行翻译）" value="groq" />
+            <el-option label="Groq Turbo（需要使用魔法）" value="groq-turbo" />
+            <el-option label="Qwen3-ASR（敬请期待）" value="qwen" disabled />
+            <el-option label="GLM-ASR（尽情期待）" value="glm" disabled />
+            <el-option-group label="本地 Whisper（GPU/CPU）">
+              <el-option label="本地 base" value="local-base" />
+              <el-option label="本地 small" value="local-small" />
+              <el-option label="本地 medium" value="local-medium" />
+              <el-option label="本地 large-v3" value="local-large-v3" />
+            </el-option-group>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="选项">
+          <el-checkbox v-model="bilingual">双语字幕</el-checkbox>
+        </el-form-item>
+        <el-form-item label="翻译风格">
+          <el-switch v-model="styleEnabled" />
+          <template v-if="styleEnabled">
+            <div class="style-presets">
+              <el-tag v-for="p in stylePresets" :key="p.label" size="small" effect="plain"
+                      class="style-tag" @click="stylePrompt = p.prompt">{{ p.label }}</el-tag>
+            </div>
+            <el-input v-model="stylePrompt" type="textarea" :rows="2" maxlength="500" show-word-limit
+                      placeholder="描述期望的翻译风格，如：古风文雅、网络流行语、正式书面…" />
+          </template>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="submitting" icon="el-icon-position" @click="submit">开始翻译</el-button>
+          <span class="hint" style="margin-left:12px">提交后可到「我的任务」查看进度</span>
+        </el-form-item>
+      </el-form>
+    </el-card>
   </div>
 </template>
 
 <script>
 import http from '../api/http'
-import StyleDialog from '../components/StyleDialog.vue'
 import { LANG_GROUPS } from '../constants/langs'
-import { STYLE_PRESETS } from '../constants/styles'
+import stylePresetsMixin from '../mixins/stylePresets'
 
-const STATUS_TEXT = {
-  PENDING: '排队中', EXTRACTING_AUDIO: '提取音频', TRANSCRIBING: '语音转文字',
-  ANALYZING_VIDEO: '分析视频', BUILDING_KB: '构建知识库', TRANSLATING: 'AI 翻译中',
-  BURNING: '烧录字幕', DONE: '完成', FAILED: '失败'
-}
+const AUDIO_ACCEPT = 'audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.wma'
+const VIDEO_ACCEPT = 'video/*,audio/*,.mp4,.mkv,.mov,.avi,.webm,.flv,.ts,.m4v,.wmv,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.wma'
 
 export default {
   name: 'NormalMode',
-  components: { StyleDialog },
+  mixins: [stylePresetsMixin],
   data () {
     return {
       rawFile: null,
@@ -111,35 +81,14 @@ export default {
       langGroups: LANG_GROUPS,
       asrProvider: 'groq',
       bilingual: false,
-      styleEnabled: false,
-      stylePrompt: '',
-      stylePresets: STYLE_PRESETS,
-      submitting: false,
-      tasks: [],
-      timer: null,
-      styleVisible: false,
-      styleTaskId: null
+      submitting: false
     }
   },
-  mounted () {
-    this.fetchTasks()
-    this.loadDefaultStyle()
-    this.timer = setInterval(this.fetchTasks, 2000)
-  },
-  beforeDestroy () {
-    clearInterval(this.timer)
+  computed: {
+    isAudio () { return this.$route.meta.kind === 'audio' },
+    accept () { return this.isAudio ? AUDIO_ACCEPT : VIDEO_ACCEPT }
   },
   methods: {
-    /** 设置页存过默认风格则自动带出（任务里可临时改/关，只影响本次） */
-    loadDefaultStyle () {
-      http.get('/settings').then(r => {
-        const s = r.data && r.data.stylePrompt
-        if (s) {
-          this.styleEnabled = true
-          this.stylePrompt = s
-        }
-      }).catch(() => {})
-    },
     onFileChange (file, fileList) {
       this.rawFile = file.raw
       this.fileList = fileList.slice(-1)
@@ -149,7 +98,7 @@ export default {
       this.fileList = []
     },
     async submit () {
-      if (!this.rawFile) return this.$message.warning('请先选择视频')
+      if (!this.rawFile) return this.$message.warning(this.isAudio ? '请先选择音频文件' : '请先选择视频或音频文件')
       this.submitting = true
       try {
         const fd = new FormData()
@@ -160,83 +109,17 @@ export default {
         fd.append('bilingual', this.bilingual)
         fd.append('stylePrompt', this.styleEnabled ? this.stylePrompt.trim() : '')
         await http.post('/tasks', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
-        this.$message.success('任务已提交')
+        this.$message.success('任务已提交，正在跳转到我的任务…')
         this.rawFile = null
         this.fileList = []
-        this.fetchTasks()
+        this.$router.push('/tasks')
       } catch (e) { /* ignore */ } finally { this.submitting = false }
-    },
-    fetchTasks () {
-      http.get('/tasks').then(r => { this.tasks = r.data }).catch(() => {})
-    },
-    async download (id) {
-      try {
-        const resp = await http.get(`/tasks/${id}/srt`, { responseType: 'blob' })
-        const url = URL.createObjectURL(resp.data)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `subtitle-${id}.srt`
-        a.click()
-        URL.revokeObjectURL(url)
-      } catch (e) { /* ignore */ }
-    },
-    async downloadVideo (id) {
-      try {
-        const resp = await http.get(`/tasks/${id}/video`, { responseType: 'blob' })
-        const url = URL.createObjectURL(resp.data)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `burned-${id}.mp4`
-        a.click()
-        URL.revokeObjectURL(url)
-      } catch (e) { /* ignore */ }
-    },
-    openStyle (id) {
-      this.styleTaskId = id
-      this.styleVisible = true
-    },
-    retry (row) {
-      this.$confirm(`重跑任务「${row.originalFilename || row.id}」？将清除现有字幕、复用已上传视频重新处理。`, '重试', {
-        confirmButtonText: '重试', cancelButtonText: '取消', type: 'warning'
-      }).then(async () => {
-        try {
-          await http.post(`/tasks/${row.id}/retry`)
-          this.$message.success('已重新提交')
-          this.fetchTasks()
-        } catch (e) { /* 拦截器已提示 */ }
-      }).catch(() => {})
-    },
-    remove (row) {
-      this.$confirm(`确定删除任务「${row.originalFilename || row.id}」吗？字幕与文件将一并清除，不可恢复。`, '删除任务', {
-        confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning'
-      }).then(async () => {
-        try {
-          await http.delete(`/tasks/${row.id}`)
-          this.$message.success('已删除')
-          this.fetchTasks()
-        } catch (e) { /* 拦截器已提示 */ }
-      }).catch(() => {})
-    },
-    statusText (s) { return STATUS_TEXT[s] || s },
-    isFinal (s) { return s === 'DONE' || s === 'FAILED' },
-    tagType (s) {
-      if (s === 'DONE') return 'success'
-      if (s === 'FAILED') return 'danger'
-      return 'info'
     }
   }
 }
 </script>
 
 <style scoped>
-.topbar {
-  height: 56px; background: #5b6ee1; color: #fff;
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0 24px; font-size: 18px;
-}
-.body { max-width: 900px; margin: 24px auto; display: flex; flex-direction: column; gap: 20px; }
-.style-presets { margin: 6px 0; }
-.style-tag { cursor: pointer; margin-right: 6px; }
-.err { color: #f56c6c; font-size: 12px; }
-.del { color: #f56c6c; }
+.create-page { max-width: 760px; margin: 0 auto; }
+.form-card { padding: 6px 8px; }
 </style>

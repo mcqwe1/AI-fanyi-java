@@ -1,28 +1,40 @@
-# 数据与密钥（不进版本库）
+# ── 用户数据与密钥（绝对不能进版本库）──
 data/
-.env
+backend/data/
 *.log
+.env
+*.secret
 
-# 构建产物
+# ── 便携分发产物（内置 JRE / Python 运行时 / Whisper 模型，共 20GB+）──
+dist/
+ai-service/models/
+ai-service/python/
+ai-service/.venv/
+
+# ── 构建产物 ──
 backend/target/
-frontend/node_modules/
+# 前端构建结果，打包时由 build-portable.ps1 拷入
+backend/src/main/resources/static/
 frontend/dist/
+frontend/node_modules/
 
-# IDE
+# ── 本地测试素材与临时文件 ──
+# 注意路径前缀 /：只排除根目录的 test/，否则会连 backend/src/test/ 的单测一起吞掉
+tmp-e2e/
+/test/
+*.mp4
+*.mkv
+*.mov
+*.mp3
+*.wav
+*.m4a
+
+# ── IDE 与工具 ──
 .idea/
 .vscode/
+.claude/
+*.iml
 
-# 测试产物
-test/*.wav
-test/*.mp4
-
- 
-# Python
-ai-service/.venv/
-*.pyc
+# ── Python ──
 __pycache__/
-
-# 测试文件
-test/*.wav
-test/*.mp4
- 
+*.pyc

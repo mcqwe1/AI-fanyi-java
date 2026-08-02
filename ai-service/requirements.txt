@@ -5,10 +5,17 @@ uvicorn[standard]
 # 阶段2 本地 ASR（独立的 Python 3.11/3.12 venv —— torch/ct2 暂无 3.14 wheel）
 faster-whisper>=1.1.0
 
+# TTS 配音（微软 Edge 朗读，免费免 Key）
+edge-tts>=6.1.0
+
+# Agent 模式术语向量（/embed）：多语言句向量，ONNX 推理、纯 CPU，不与 whisper 抢显存。
+# 用 fastembed 而非 sentence-transformers：后者硬拉整套 torch（实测装完 +1.2GB），
+# 而本项目 ASR 走 CTranslate2 根本不需要 torch —— 为算 384 维向量引入训练框架不划算。
+# fastembed 的 onnxruntime/numpy/tokenizers 本就已装，实际净增约 56MB。
+# 缺失时 /embed 返回可读错误，Agent 模式退化为精确匹配，不影响转写/配音/翻译。
+fastembed>=0.4.0
+
 # GPU（CUDA 12）运行库：CTranslate2 4.x 依赖 cuBLAS + cuDNN 9
 # 纯 CPU 跑可不装这两行
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
-
-# 阶段3
-# google-genai

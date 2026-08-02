@@ -31,9 +31,8 @@ public class JwtAuthFilter extends OncePerRequestFilter {
     protected void doFilterInternal(@NonNull HttpServletRequest request,
                                     @NonNull HttpServletResponse response,
                                     @NonNull FilterChain chain) throws ServletException, IOException {
-        String header = request.getHeader("Authorization");
-        if (StringUtils.hasText(header) && header.startsWith("Bearer ")) {
-            String token = header.substring(7);
+        String token = resolveToken(request);
+        if (StringUtils.hasText(token)) {
             Claims claims = jwtUtil.parse(token);
             if (claims != null) {
                 Long uid = claims.get("uid", Long.class);
@@ -45,5 +44,17 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             }
         }
         chain.doFilter(request, response);
+    }
+
+    /**
+     * 优先取 Authorization: Bearer；缺失时回退 access_token 查询参数。
+     * 后者供 &lt;video&gt;/&lt;audio&gt; 直接播放用（HTML 媒体元素无法自定义请求头）。
+     */
+    private static String resolveToken(HttpServletRequest request) {
+        String header = request.getHeader("Authorization");
+        if (StringUtils.hasText(header) && header.startsWith("Bearer ")) {
+            return header.substring(7);
+        }
+        return request.getParameter("access_token");
     }
 }

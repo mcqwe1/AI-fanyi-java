@@ -1,3 +1,10 @@
 @echo off
-REM Double-click to stop the aifanyi app servers (Docker stays up).
-powershell -ExecutionPolicy Bypass -NoProfile -File "%~dp0stop-all.ps1"
+rem Forwarder to the portable bundle's stop script.
+setlocal
+set "DIST=%~dp0dist\aifanyi-win64"
+if exist "%DIST%\stop.bat" (
+  call "%DIST%\stop.bat" %*
+) else (
+  echo Portable bundle not built yet - nothing to stop.
+  pause
+)

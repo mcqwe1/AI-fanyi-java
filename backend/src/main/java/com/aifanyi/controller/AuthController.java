@@ -5,14 +5,11 @@ import com.aifanyi.controller.dto.AuthDtos.LoginRequest;
 import com.aifanyi.controller.dto.AuthDtos.LoginResponse;
 import com.aifanyi.controller.dto.AuthDtos.RegisterRequest;
 import com.aifanyi.controller.dto.SettingsDtos.ChangePasswordReq;
-import com.aifanyi.security.AuthUser;
 import com.aifanyi.security.SecurityUtils;
 import com.aifanyi.service.AuthService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
-
-import java.util.Map;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -37,12 +34,13 @@ public class AuthController {
         return R.ok();
     }
 
-    @GetMapping("/me")
-    public R<Map<String, Object>> me() {
-        AuthUser u = SecurityUtils.current();
-        if (u == null) {
-            return R.fail(401, "未登录");
-        }
-        return R.ok(Map.of("userId", u.userId(), "username", u.username()));
+    /** 修改用户名（需密码确认）；成功返回新 token，前端立即替换本地登录态。 */
+    public record ChangeUsernameReq(String newUsername, String password) {
+    }
+
+    @PostMapping("/change-username")
+    public R<LoginResponse> changeUsername(@RequestBody ChangeUsernameReq req) {
+        return R.ok(authService.changeUsername(
+                SecurityUtils.currentUserId(), req.newUsername(), req.password()));
     }
 }

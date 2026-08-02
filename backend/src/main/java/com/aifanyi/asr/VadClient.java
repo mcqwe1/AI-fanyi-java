@@ -25,10 +25,12 @@ public class VadClient {
     private final AifanyiProperties.Asr.Local cfg;
     private final ObjectMapper mapper;
     private final RestClient client;
+    private final AiServiceLauncher launcher;
 
-    public VadClient(AifanyiProperties props, ObjectMapper mapper) {
+    public VadClient(AifanyiProperties props, ObjectMapper mapper, AiServiceLauncher launcher) {
         this.cfg = props.getAsr().getLocal();
         this.mapper = mapper;
+        this.launcher = launcher;
         SimpleClientHttpRequestFactory rf = new SimpleClientHttpRequestFactory();
         rf.setConnectTimeout(Duration.ofSeconds(5));
         // 长音频解码+VAD 可能要几分钟（CPU），给足余量
@@ -38,6 +40,10 @@ public class VadClient {
 
     /** 返回 [startMs, endMs] 语音区间列表（升序）。 */
     public List<long[]> speechRegionsMs(Path audio) {
+        // 尽力自动拉起（装了本地组件就顺带享受 VAD 对轴）；拉不起来交由调用方降级
+        if (!launcher.ensureRunning(false)) {
+            throw new BizException("本地识别组件未安装/未运行，跳过 VAD 对轴");
+        }
         String url = cfg.getBaseUrl().replaceAll("/+$", "") + "/vad";
         ObjectNode req = mapper.createObjectNode();
         req.put("audio_path", audio.toString());

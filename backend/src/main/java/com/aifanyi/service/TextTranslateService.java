@@ -35,8 +35,6 @@ public class TextTranslateService {
     private static final int MAX_TEXT_CHARS = 100_000;
     /** 单块字符上限：超长行按句子边界切块，避免单批 prompt/输出 token 溢出 */
     private static final int MAX_SEG_CHARS = 1200;
-    /** 切点搜索下限：句边界太靠前就退次级标点/硬切，避免切出碎块 */
-    private static final int MIN_CUT = MAX_SEG_CHARS / 4;
     /** 动态批大小的目标字符量：短行文本≈现状 40 行/批，长块文本 2~3 块/批 */
     private static final int TARGET_BATCH_CHARS = 3000;
     private static final int HISTORY_LIMIT = 50;
@@ -133,6 +131,82 @@ public class TextTranslateService {
         return new TextTranslateResp(row.getId(), lines, plainTarget, cfg.model(), elapsed, untranslated);
     }
 
+    /** 支持的文本附件扩展名。 */
+    private static final java.util.Set<String> TEXT_EXTS = java.util.Set.of("txt", "md", "markdown", "srt", "vtt");
+
+    /**
+     * 文件翻译：读取上传的文本文件（自动识别 UTF-8/GBK/BOM），翻译后返回结果 +
+     * 可下载的同格式译文。srt/vtt 只翻字幕文本行、保留序号与时间轴；txt/md 整篇按行翻。
+     */
+    public com.aifanyi.controller.dto.TextTranslateDtos.FileTranslateResp translateFile(
+            Long userId, byte[] bytes, String originalName, String targetLang, String stylePrompt) {
+        String ext = ext(originalName);
+        if (!TEXT_EXTS.contains(ext)) {
+            throw new BizException("仅支持 txt / md / srt / vtt 文本文件；Word/PPT/PDF 请用「文档翻译」");
+        }
+        String content = com.aifanyi.media.CharsetSniffer.decode(bytes);
+        if (!StringUtils.hasText(content)) {
+            throw new BizException("文件内容为空或无法识别编码");
+        }
+
+        boolean subtitle = ext.equals("srt") || ext.equals("vtt");
+        TextTranslateResp base = subtitle
+                ? translate(userId, new TextTranslateReq(extractSubtitleText(content), targetLang, stylePrompt))
+                : translate(userId, new TextTranslateReq(content, targetLang, stylePrompt));
+
+        String outFormat = subtitle ? ext : (ext.equals("markdown") ? "md" : ext);
+        String outName = baseName(originalName) + "." + targetTag(targetLang) + "." + outFormat;
+        return new com.aifanyi.controller.dto.TextTranslateDtos.FileTranslateResp(
+                base.id(), base.lines(), base.plainTarget(), base.model(), base.elapsedMs(),
+                base.untranslatedLines(), outName, outFormat);
+    }
+
+    /** 从 srt/vtt 抽出纯字幕文本（每条一行；丢弃序号、时间轴、空行、WEBVTT 头），供翻译。 */
+    private static String extractSubtitleText(String content) {
+        String[] lines = content.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1);
+        StringBuilder sb = new StringBuilder();
+        for (String ln : lines) {
+            String t = ln.strip();
+            if (t.isEmpty() || t.equalsIgnoreCase("WEBVTT")) {
+                continue;
+            }
+            if (t.matches("\\d+")) {
+                continue;                             // 纯序号行
+            }
+            if (t.contains("-->")) {
+                continue;                             // 时间轴行
+            }
+            if (sb.length() > 0) {
+                sb.append('\n');
+            }
+            sb.append(t);
+        }
+        return sb.toString();
+    }
+
+    private static String ext(String name) {
+        if (name == null) {
+            return "";
+        }
+        int dot = name.lastIndexOf('.');
+        return dot < 0 ? "" : name.substring(dot + 1).toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static String baseName(String name) {
+        if (name == null) {
+            return "translation";
+        }
+        String n = name.replaceAll("[\\\\/]", "_");
+        int dot = n.lastIndexOf('.');
+        return dot <= 0 ? n : n.substring(0, dot);
+    }
+
+    /** 目标语言简短标签，用于译文文件名（去掉可能的空白/斜杠）。 */
+    private static String targetTag(String targetLang) {
+        String t = targetLang == null ? "译文" : targetLang.trim();
+        return t.isEmpty() ? "译文" : t.replaceAll("[\\s\\\\/]", "");
+    }
+
     /** 历史列表（当前用户，最新在前；只取轻量列，不拉 MEDIUMTEXT 大字段）。 */
     public List<HistoryItem> history(Long userId) {
         List<TextTranslation> rows = mapper.selectList(Wrappers.<TextTranslation>lambdaQuery()
@@ -176,57 +250,10 @@ public class TextTranslateService {
     }
 
     /**
-     * 超长行按句子边界切块。优先句末标点（'.' 仅当后跟空白/行尾，避开 3.14、U.S.），
-     * 退而求次级停顿标点/空格，再退硬切；切点落在代理对高位时回退一位，不拆字符。
+     * 超长行按句子边界切块。实现见 {@link com.aifanyi.media.TextSplitter}（与 Agent 文本链共用）。
      */
     static List<String> splitLong(String line) {
-        List<String> out = new ArrayList<>();
-        int i = 0;
-        while (line.length() - i > MAX_SEG_CHARS) {
-            int end = i + MAX_SEG_CHARS;
-            int cut = findCut(line, i, end, TextTranslateService::isSentenceEnd);
-            if (cut < 0) {
-                cut = findCut(line, i, end, TextTranslateService::isSoftBreak);
-            }
-            if (cut < 0) {
-                cut = end - 1;
-            }
-            if (Character.isHighSurrogate(line.charAt(cut))) {
-                cut--;
-            }
-            out.add(line.substring(i, cut + 1));
-            i = cut + 1;
-        }
-        out.add(line.substring(i));
-        return out;
-    }
-
-    /** 在 [from+MIN_CUT, end) 内从后往前找第一个满足条件的切点，找不到返回 -1。 */
-    private static int findCut(String line, int from, int end, CutPredicate pred) {
-        for (int j = end - 1; j >= from + MIN_CUT; j--) {
-            if (pred.test(line, j)) {
-                return j;
-            }
-        }
-        return -1;
-    }
-
-    private interface CutPredicate {
-        boolean test(String line, int idx);
-    }
-
-    private static boolean isSentenceEnd(String line, int idx) {
-        char c = line.charAt(idx);
-        if ("。！？!?…；;".indexOf(c) >= 0) {
-            return true;
-        }
-        // '.' 仅当后一字符是空白或行尾才算句末（避开小数点、缩写）
-        return c == '.' && (idx + 1 >= line.length() || Character.isWhitespace(line.charAt(idx + 1)));
-    }
-
-    private static boolean isSoftBreak(String line, int idx) {
-        char c = line.charAt(idx);
-        return "，,、）)】》”\" ".indexOf(c) >= 0 || Character.isWhitespace(c);
+        return com.aifanyi.media.TextSplitter.splitLong(line, MAX_SEG_CHARS);
     }
 
     /**

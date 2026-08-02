@@ -12,6 +12,11 @@
         </el-form-item>
         <el-button type="primary" :loading="loading" style="width:100%" @click="login">登录</el-button>
         <el-button :loading="loading" style="width:100%;margin:12px 0 0 0" @click="register">注册</el-button>
+        <div style="text-align:center;margin-top:14px">
+          <el-link type="primary" :underline="false" @click="$router.push('/guide')">
+            <i class="el-icon-question" /> 第一次用？看使用教程
+          </el-link>
+        </div>
       </el-form>
     </el-card>
   </div>

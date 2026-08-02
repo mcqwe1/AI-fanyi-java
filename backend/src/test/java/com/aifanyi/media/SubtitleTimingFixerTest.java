@@ -132,13 +132,49 @@ class SubtitleTimingFixerTest {
     }
 
     @Test
-    void longSegmentOnlyDroppedOnZeroOverlap() {
-        // >6s 的长段：有一丁点重叠就保留；零重叠才丢
+    void longCoherentSegmentNeverDropped() {
+        // >6s 的长段一律免死：ASR 能转出连贯长句本身就是强语音证据
+        //（2026-08-01 实锤：耳语内容 17s 真台词因 VAD 零重叠被杀）
         Segment longSeg = seg(10_000, 17_000);
         assertThat(SubtitleTimingFixer.dropNonSpeech(
-                List.of(longSeg), regions(new long[]{16_900, 17_000}))).hasSize(1);
+                List.of(longSeg), regions(new long[]{40_000, 41_000}))).hasSize(1);
+    }
+
+    @Test
+    void midSegmentDroppedOnlyOnZeroOverlap() {
+        // 2~6s 的中段：有一丁点重叠就保留，完全零重叠才丢
+        Segment mid = seg(10_000, 13_000);
         assertThat(SubtitleTimingFixer.dropNonSpeech(
-                List.of(longSeg), regions(new long[]{40_000, 41_000}))).isEmpty();
+                List.of(mid), regions(new long[]{13_300, 13_400}))).hasSize(1);   // 重叠100ms → 留
+        assertThat(SubtitleTimingFixer.dropNonSpeech(
+                List.of(mid), regions(new long[]{40_000, 41_000}))).isEmpty();    // 零重叠 → 丢
+    }
+
+    @Test
+    void massConflictTripsFuseAndKeepsEverything() {
+        // 熔断：VAD 判掉 18/24 条（75% > 25%）→ VAD 对该素材不可靠（耳语内容），一条不删
+        java.util.List<Segment> segs = new java.util.ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            segs.add(seg(i * 2_000, i * 2_000 + 1_500));            // 语音区内的真段
+        }
+        for (int i = 0; i < 18; i++) {
+            segs.add(seg(100_000 + i * 2_000, 100_000 + i * 2_000 + 1_000));   // VAD 零重叠
+        }
+        List<Segment> out = SubtitleTimingFixer.dropNonSpeech(segs, regions(new long[]{0, 50_000}));
+        assertThat(out).hasSize(24);                                 // 全体放行
+    }
+
+    @Test
+    void minorityHallucinationsStillDroppedBelowFuse() {
+        // 少数派幻觉（2/24 ≈ 8% < 25%）不触发熔断，照常删除
+        java.util.List<Segment> segs = new java.util.ArrayList<>();
+        for (int i = 0; i < 22; i++) {
+            segs.add(seg(i * 2_000, i * 2_000 + 1_500));
+        }
+        segs.add(seg(100_000, 101_000));
+        segs.add(seg(105_000, 106_000));
+        List<Segment> out = SubtitleTimingFixer.dropNonSpeech(segs, regions(new long[]{0, 50_000}));
+        assertThat(out).hasSize(22);
     }
 
     // ---- shiftAll ----

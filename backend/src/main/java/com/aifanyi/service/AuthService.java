@@ -62,4 +62,38 @@ public class AuthService {
         user.setPassword(passwordEncoder.encode(newPwd));
         userMapper.updateById(user);
     }
+
+    /**
+     * 修改用户名：需密码确认；查重后更新并签发新 token
+     * （旧 token 的 subject 是旧用户名，仍可用至过期，前端应立即换用新 token）。
+     */
+    @Transactional
+    public LoginResponse changeUsername(Long userId, String newUsername, String password) {
+        if (newUsername == null || newUsername.isBlank()) {
+            throw new BizException(400, "新用户名不能为空");
+        }
+        String name = newUsername.trim();
+        if (name.length() < 2 || name.length() > 32) {
+            throw new BizException(400, "用户名长度 2~32 个字符");
+        }
+        User user = userMapper.selectById(userId);
+        if (user == null) {
+            throw new BizException(404, "用户不存在");
+        }
+        if (!passwordEncoder.matches(password == null ? "" : password, user.getPassword())) {
+            throw new BizException(400, "密码错误，无法修改用户名");
+        }
+        if (name.equals(user.getUsername())) {
+            throw new BizException(400, "新用户名与当前相同");
+        }
+        Long exists = userMapper.selectCount(
+                Wrappers.<User>lambdaQuery().eq(User::getUsername, name));
+        if (exists != null && exists > 0) {
+            throw new BizException(409, "该用户名已被占用");
+        }
+        user.setUsername(name);
+        userMapper.updateById(user);
+        String token = jwtUtil.generate(user.getId(), user.getUsername());
+        return new LoginResponse(user.getId(), user.getUsername(), user.getNickname(), token);
+    }
 }

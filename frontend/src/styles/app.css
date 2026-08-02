@@ -1,0 +1,62 @@
+/* aifanyi 工作台皮肤:全局设计变量与通用块(照 2026-07-14 设计稿) */
+:root {
+  --bg: #f5f7fb;
+  --card-radius: 14px;
+  --brand: #4c7dff;
+  --brand-deep: #3b66f5;
+  --grad: linear-gradient(90deg, #3b82f6, #8b5cf6);
+  --text-main: #1f2d3d;
+  --text-sub: #8492a6;
+  --shadow: 0 4px 20px rgba(31, 45, 61, .06);
+}
+
+body { background: var(--bg); }
+
+/* 内页统一标题区(替代旧顶栏) */
+.page-head { margin: 2px 0 18px; }
+.page-head h2 { margin: 0 0 6px; font-size: 22px; color: var(--text-main); }
+.page-head p { margin: 0; color: var(--text-sub); font-size: 13px; }
+
+/* 渐变标题文字 */
+.grad-text {
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* 卡片圆角柔和阴影(覆盖 ElementUI 默认) */
+.el-card {
+  border-radius: var(--card-radius) !important;
+  border: 1px solid #eef1f6 !important;
+  box-shadow: var(--shadow) !important;
+}
+
+/* 彩色图标方块(模式卡/亮点条通用) */
+.icon-tile {
+  width: 64px; height: 64px; border-radius: 16px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 30px; color: #fff;
+}
+.tile-blue   { background: linear-gradient(135deg, #60a5fa, #3b82f6); }
+.tile-green  { background: linear-gradient(135deg, #34d399, #10b981); }
+.tile-purple { background: linear-gradient(135deg, #a78bfa, #8b5cf6); }
+.tile-orange { background: linear-gradient(135deg, #fbbf24, #f59e0b); }
+.tile-rose   { background: linear-gradient(135deg, #f472b6, #ec4899); }
+
+/* 模式主按钮配色 */
+.btn-mode { border: none !important; color: #fff !important; width: 100%; border-radius: 8px !important; }
+.btn-blue   { background: linear-gradient(90deg, #4c7dff, #3b66f5) !important; }
+.btn-green  { background: linear-gradient(90deg, #14c08d, #0ea371) !important; }
+.btn-purple { background: linear-gradient(90deg, #9d71ff, #7c4dff) !important; }
+.btn-orange { background: linear-gradient(90deg, #fb9e3c, #f2820a) !important; }
+.btn-rose   { background: linear-gradient(90deg, #f45fa4, #e0338a) !important; }
+
+/* 状态色小字 */
+.err { color: #f56c6c; font-size: 12px; }
+.del { color: #f56c6c !important; }
+.hint { color: var(--text-sub); font-size: 12px; }
+
+/* 翻译风格预设标签（三个翻译模式 + 设置页共用） */
+.style-presets { margin: 6px 0; }
+.style-tag { cursor: pointer; margin-right: 6px; }

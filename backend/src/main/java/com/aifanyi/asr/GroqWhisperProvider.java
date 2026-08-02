@@ -110,6 +110,10 @@ public class GroqWhisperProvider implements AsrProvider {
                 for (Segment s : parsed) {
                     all.add(new Segment(s.startMs() + offset, s.endMs() + offset, s.text()));
                 }
+                if (ctx != null) {
+                    // 分块转写较久（每块一次上传+转写），按块回报进度
+                    ctx.reportProgress((i + 1) / (double) (bounds.size() - 1));
+                }
             } finally {
                 try {
                     Files.deleteIfExists(chunk);

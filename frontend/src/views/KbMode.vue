@@ -1,9 +1,8 @@
 <template>
   <div class="page">
-    <div class="topbar">
-      <el-button type="text" style="color:#fff" icon="el-icon-back" @click="$router.push('/')">返回</el-button>
-      <span>AI 知识库翻译（术语表）</span>
-      <span />
+    <div class="page-head">
+      <h2>术语库AI视频翻译</h2>
+      <p>一系列视频共用一张术语表，ai自动提取术语并进行联网查验</p>
     </div>
 
     <div class="body">
@@ -34,8 +33,8 @@
             </el-form-item>
             <el-form-item label="语音识别">
               <el-select v-model="asrProvider" style="width:100%">
-                <el-option label="Groq（推荐）" value="groq" />
-                <el-option label="Groq Turbo" value="groq-turbo" />
+                <el-option label="Groq（需要使用魔法，使用large-v3模型进行翻译）" value="groq" />
+                <el-option label="Groq Turbo（需要使用魔法）" value="groq-turbo" />
                 <el-option-group label="本地 Whisper">
                   <el-option label="本地 base" value="local-base" />
                   <el-option label="本地 small" value="local-small" />
@@ -126,14 +125,16 @@
               <span v-if="row.status === 'FAILED'" class="errmsg">{{ row.errorMsg }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="360">
+          <el-table-column label="操作" width="430">
             <template slot-scope="{ row }">
+              <el-button v-if="row.status === 'DONE'" type="text" icon="el-icon-edit-outline"
+                         @click="$router.push(`/editor/${row.id}`)">编辑字幕</el-button>
               <el-button v-if="row.status === 'DONE'" type="text" @click="download(row.id)">下载SRT</el-button>
-              <el-button v-if="row.status === 'DONE' || row.status === 'BURNING'" type="text"
-                         @click="openStyle(row.id)">字幕样式/烧录</el-button>
+              <el-button v-if="row.mediaType !== 'AUDIO' && (row.status === 'DONE' || row.status === 'BURNING')"
+                         type="text" @click="openStyle(row.id)">烧录</el-button>
               <el-button v-if="row.hasVideo" type="text" @click="downloadVideo(row.id)">下载视频</el-button>
-              <el-button v-if="row.status === 'DONE' || row.status === 'FAILED'" type="text" @click="retry(row)">重试</el-button>
-              <el-button type="text" class="del" @click="removeTask(row)">删除</el-button>
+              <el-button v-if="isFinal(row.status)" type="text" @click="retry(row)">重试</el-button>
+              <el-button type="text" class="del" @click="remove(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -147,7 +148,7 @@
     <!-- 新建项目弹窗 -->
     <el-dialog title="新建系列项目" :visible.sync="newProjVisible" width="420px">
       <el-form label-width="80px">
-        <el-form-item label="项目名"><el-input v-model="newProj.name" placeholder="如：本多频道" /></el-form-item>
+        <el-form-item label="项目名"><el-input v-model="newProj.name" placeholder="如：奥特曼系列" /></el-form-item>
         <el-form-item label="源语言">
           <el-select v-model="newProj.sourceLang" style="width:100%">
             <el-option label="自动检测" value="auto" />
@@ -177,23 +178,19 @@
 <script>
 import http from '../api/http'
 import StyleDialog from '../components/StyleDialog.vue'
-import { STYLE_PRESETS } from '../constants/styles'
-
-const STATUS_TEXT = {
-  PENDING: '排队中', EXTRACTING_AUDIO: '提取音频', TRANSCRIBING: '语音转文字',
-  ANALYZING_VIDEO: '分析视频', BUILDING_KB: '抽取术语', TRANSLATING: 'AI 翻译中',
-  BURNING: '烧录字幕', DONE: '完成', FAILED: '失败'
-}
-
-// 术语六大类
-const CATEGORIES = ['人名', '地名与地址', '机构组织与品牌', '作品名', '文化专有项', '科技专名']
+import stylePresetsMixin from '../mixins/stylePresets'
+import taskOps from '../mixins/taskOps'
+import { statusText, isFinal, tagType } from '../constants/status'
+import { blobDown } from '../utils/download'
+import { TERM_CATEGORIES } from '../constants/kb'
 
 export default {
   name: 'KbMode',
   components: { StyleDialog },
+  mixins: [stylePresetsMixin, taskOps],
   data () {
     return {
-      categories: CATEGORIES,
+      categories: TERM_CATEGORIES,
       projects: [],
       projectId: null,
       terms: [],
@@ -203,9 +200,6 @@ export default {
       fileList: [],
       asrProvider: 'groq',
       bilingual: false,
-      styleEnabled: false,
-      stylePrompt: '',
-      stylePresets: STYLE_PRESETS,
       submitting: false,
       savingTerms: false,
       newProjVisible: false,
@@ -223,23 +217,13 @@ export default {
   mounted () {
     this.loadProjects()
     this.fetchTasks()
-    this.loadDefaultStyle()
     this.timer = setInterval(this.fetchTasks, 2000)
   },
   beforeDestroy () {
     clearInterval(this.timer)
   },
   methods: {
-    /** 设置页存过默认风格则自动带出（任务里可临时改/关，只影响本次） */
-    loadDefaultStyle () {
-      http.get('/settings').then(r => {
-        const s = r.data && r.data.stylePrompt
-        if (s) {
-          this.styleEnabled = true
-          this.stylePrompt = s
-        }
-      }).catch(() => {})
-    },
+    statusText, isFinal, tagType,
     async loadProjects () {
       try {
         const r = await http.get('/kb/projects')
@@ -313,42 +297,14 @@ export default {
       if (building) this._sawBuilding = true
       else if (this._sawBuilding) { this._sawBuilding = false; this.loadTerms(); this.loadProjects() }
     },
-    async download (id) {
-      try {
-        const resp = await http.get(`/tasks/${id}/srt`, { responseType: 'blob' })
-        const url = URL.createObjectURL(resp.data)
-        const a = document.createElement('a')
-        a.href = url; a.download = `subtitle-${id}.srt`; a.click()
-        URL.revokeObjectURL(url)
-      } catch (e) { /* ignore */ }
-    },
-    async downloadVideo (id) {
-      try {
-        const resp = await http.get(`/tasks/${id}/video`, { responseType: 'blob' })
-        const url = URL.createObjectURL(resp.data)
-        const a = document.createElement('a')
-        a.href = url; a.download = `burned-${id}.mp4`; a.click()
-        URL.revokeObjectURL(url)
-      } catch (e) { /* ignore */ }
-    },
+    download (id) { blobDown(`/tasks/${id}/srt`, `subtitle-${id}.srt`) },
+    downloadVideo (id) { blobDown(`/tasks/${id}/video`, `burned-${id}.mp4`) },
     openStyle (id) {
       this.styleTaskId = id
       this.styleVisible = true
     },
-    retry (row) {
-      this.$confirm(`重跑任务「${row.originalFilename || row.id}」？将清除现有字幕、复用已上传视频重新处理。`, '重试', {
-        confirmButtonText: '重试', cancelButtonText: '取消', type: 'warning'
-      }).then(async () => {
-        try { await http.post(`/tasks/${row.id}/retry`); this.$message.success('已重新提交'); this.fetchTasks() } catch (e) { /* */ }
-      }).catch(() => {})
-    },
-    removeTask (row) {
-      this.$confirm(`删除任务「${row.originalFilename || row.id}」？`, '提示', {
-        confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning'
-      }).then(async () => {
-        try { await http.delete(`/tasks/${row.id}`); this.$message.success('已删除'); this.fetchTasks() } catch (e) { /* */ }
-      }).catch(() => {})
-    },
+    retry (row) { this.retryTask(row, this.fetchTasks) },
+    remove (row) { this.removeTask(row, this.fetchTasks) },
     async createProject () {
       if (!this.newProj.name) return this.$message.warning('请填项目名')
       this.creatingProj = true
@@ -374,29 +330,17 @@ export default {
           this.loadProjects()
         } catch (e) { /* ignore */ }
       }).catch(() => {})
-    },
-    statusText (s) { return STATUS_TEXT[s] || s },
-    isFinal (s) { return s === 'DONE' || s === 'FAILED' },
-    tagType (s) { return s === 'DONE' ? 'success' : (s === 'FAILED' ? 'danger' : 'info') }
+    }
   }
 }
 </script>
 
 <style scoped>
-.topbar {
-  height: 56px; background: #5b6ee1; color: #fff;
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0 24px; font-size: 18px;
-}
-.body { max-width: 1100px; margin: 20px auto; padding: 0 16px; display: flex; flex-direction: column; gap: 16px; }
+.body { max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
 .proj-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .proj-bar .lbl { font-weight: 600; }
 .grid { display: grid; grid-template-columns: 360px 1fr; gap: 16px; }
 .card-head { display: flex; justify-content: space-between; align-items: center; }
-.hint { color: #999; font-size: 12px; }
-.style-presets { margin: 6px 0; }
-.style-tag { cursor: pointer; margin-right: 6px; }
 .tip { color: #999; font-size: 12px; margin-top: 8px; }
 .errmsg { color: #f56c6c; font-size: 12px; }
-.del { color: #f56c6c; }
 </style>

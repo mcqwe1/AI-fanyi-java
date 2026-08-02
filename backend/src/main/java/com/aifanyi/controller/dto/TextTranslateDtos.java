@@ -8,6 +8,19 @@ public class TextTranslateDtos {
     public record TextTranslateReq(String text, String targetLang, String stylePrompt) {
     }
 
+    /** 文件翻译结果：内嵌常规翻译结果 + 译文文件的建议下载名与格式。 */
+    public record FileTranslateResp(
+            Long id,
+            List<Line> lines,
+            String plainTarget,
+            String model,
+            long elapsedMs,
+            int untranslatedLines,
+            String filename,       // 译文文件建议名（原名加 .译文 后缀）
+            String format          // txt / srt / md
+    ) {
+    }
+
     /** 一行（或长行切出的一块）的原文/译文对。空白行占位（target 为空串）以保持段落结构。 */
     public record Line(String source, String target) {
     }

@@ -1,11 +1,6 @@
 package com.aifanyi.service;
 
-import com.aifanyi.asr.AsrContext;
-import com.aifanyi.asr.AsrProvider;
-import com.aifanyi.asr.AsrProviderFactory;
 import com.aifanyi.asr.Segment;
-import com.aifanyi.asr.VadClient;
-import com.aifanyi.common.BizException;
 import com.aifanyi.domain.TaskMode;
 import com.aifanyi.domain.TaskStatus;
 import com.aifanyi.entity.GlossaryTerm;
@@ -18,10 +13,7 @@ import com.aifanyi.llm.LlmTranslator;
 import com.aifanyi.mapper.GlossaryTermMapper;
 import com.aifanyi.mapper.SubtitleMapper;
 import com.aifanyi.mapper.TranslationTaskMapper;
-import com.aifanyi.media.FfmpegService;
-import com.aifanyi.media.HallucinationFilter;
 import com.aifanyi.media.SrtService;
-import com.aifanyi.media.SubtitleTimingFixer;
 import com.aifanyi.storage.StorageService;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
@@ -36,12 +28,11 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 
 /**
  * 普通模式翻译流水线（异步）。
  * 抽音频 → ASR 转写 → LLM 翻译 → 落库字幕 → 生成 SRT。
- * 知识库模式（阶段3）将在此扩展 ANALYZING_VIDEO / BUILDING_KB 步骤。
+ * 转写与时间轴修正已抽到 {@link MediaTranscribeService}（与模式无关，Agent 流水线共用）。
  */
 @Slf4j
 @Service
@@ -52,9 +43,7 @@ public class TaskPipeline {
     private final SubtitleMapper subtitleMapper;
     private final GlossaryTermMapper glossaryMapper;
     private final StorageService storage;
-    private final FfmpegService ffmpeg;
-    private final AsrProviderFactory asrFactory;
-    private final VadClient vadClient;
+    private final MediaTranscribeService transcriber;
     private final LlmTranslator translator;
     private final GeminiClient gemini;
     private final SettingsService settings;
@@ -67,55 +56,22 @@ public class TaskPipeline {
             return;
         }
         try {
-            // 1. 抽音频
+            // 1. 抽音频 + 2. ASR 转写 + 反幻觉 + 时间轴对齐（与模式无关，见 MediaTranscribeService）
             update(task, TaskStatus.EXTRACTING_AUDIO, 10);
-            Path video = Path.of(task.getVideoPath());
-            Path audio = storage.resolve(taskId, "audio.mp3");
-            ffmpeg.extractAudio(video, audio);
-            task.setAudioPath(audio.toString());
-            taskMapper.updateById(task);
-            // VAD 与 ASR 并行：只依赖已抽出的音频，整段耗时藏进转写里（结果在吸附前 join）
-            CompletableFuture<List<long[]>> vadFuture =
-                    CompletableFuture.supplyAsync(() -> vadClient.speechRegionsMs(audio));
-
-            // 2. ASR 转写（按用户设置解析 provider/model/key）
+            final TranslationTask progressTask = task;
             update(task, TaskStatus.TRANSCRIBING, 30);
-            AsrRoute route = resolveAsr(task.getAsrProvider(), task.getUserId());
-            AsrProvider asr = asrFactory.get(route.provider());
-            List<Segment> segments = asr.transcribe(audio, normLang(task.getSourceLang()),
-                    new AsrContext(route.apiKey(), route.model()));
-            if (segments.isEmpty()) {
-                throw new BizException("未识别到语音内容");
-            }
-            // 文本层反幻觉：黑名单套话 + 复读折叠（对所有 provider 生效）
-            segments = HallucinationFilter.filter(segments);
-            // VAD 语音区间（与 ASR 并行计算，此处 join）：非语音幻觉丢弃 + 时间轴双向对齐都靠它。
-            // ai-service 不可用则降级 ffmpeg 静音检测（只能兜底真静音处的幻觉，不做对齐）。
-            List<long[]> vadRegions = null;
-            try {
-                vadRegions = vadFuture.join();
-            } catch (Exception e) {
-                log.warn("VAD 不可用，时间轴对齐跳过、幻觉过滤退回 ffmpeg 静音检测: {}", e.getMessage());
-            }
-            if (vadRegions != null && !vadRegions.isEmpty()) {
-                // ① 与语音区间几乎零重叠的段 = 幻觉（文本无关，比黑名单更通用）
-                segments = SubtitleTimingFixer.dropNonSpeech(segments, vadRegions);
-                // ② 双向对齐：早出后移、晚出前拉、终点修剪/外扩
-                segments = SubtitleTimingFixer.alignToSpeech(segments, vadRegions);
-            } else {
-                List<long[]> silence = ffmpeg.detectSilenceMs(audio, -50, 0.8);
-                segments = SubtitleTimingFixer.dropSilenceHallucinations(segments, silence);
-            }
-            if (segments.isEmpty()) {
-                throw new BizException("未识别到有效语音（疑似全为静音/幻觉）");
-            }
-            // ③ 补回音视频流起始偏移（抽音频丢失 start_time 差 → 轴相对视频恒定错位）
-            long avOffsetMs = ffmpeg.probeAvStartOffsetMs(video);
-            if (avOffsetMs != 0) {
-                segments = SubtitleTimingFixer.shiftAll(segments, avOffsetMs);
-            }
-            // ④ 最终兜底：去空白、去重叠（避免下一句字幕提前出现）、保证最短时长
-            segments = SubtitleTimingFixer.fix(segments);
+            // 转写是最长的一段（本地 CPU 跑大模型可达视频时长量级），把 0~1 进度映射到 30~55%，
+            // 免得进度条长时间停在 30% 被用户当成卡死
+            java.util.function.DoubleConsumer asrProgress = ratio -> {
+                int pct = 30 + (int) Math.round(ratio * 25);
+                Integer cur = progressTask.getProgress();
+                if (cur == null || pct > cur) {
+                    progressTask.setProgress(pct);
+                    taskMapper.updateById(progressTask);
+                }
+            };
+            List<Segment> segments = transcriber.transcribe(task,
+                    () -> taskMapper.updateById(progressTask), asrProgress);
 
             List<String> sources = segments.stream().map(Segment::text).toList();
 
@@ -128,8 +84,9 @@ public class TaskPipeline {
                 GeminiConfig gcfg = settings.effectiveGemini(task.getUserId());
                 try {
                     String transcript = String.join("\n", sources);
+                    String customPrompt = settings.effectiveTermPrompt(task.getUserId());
                     List<GeminiClient.TermCandidate> cands = gemini.extractTerms(
-                            transcript, task.getSourceLang(), task.getTargetLang(), gcfg);
+                            transcript, task.getSourceLang(), task.getTargetLang(), gcfg, customPrompt);
                     upsertAutoTerms(task.getProjectId(), cands);
                 } catch (Exception e) {
                     // 抽术语失败不阻断翻译，仅记录
@@ -222,53 +179,6 @@ public class TaskPipeline {
             }
         }
         return map;
-    }
-
-    /** 把人类语言标签规范化为 Whisper/Groq 的 ISO 代码；识别不了返回 "auto"（自动检测）。 */
-    private static final Map<String, String> LANG_CODE = Map.ofEntries(
-            Map.entry("日语", "ja"), Map.entry("日文", "ja"), Map.entry("japanese", "ja"),
-            Map.entry("英语", "en"), Map.entry("英文", "en"), Map.entry("english", "en"),
-            Map.entry("韩语", "ko"), Map.entry("韩文", "ko"), Map.entry("korean", "ko"),
-            Map.entry("中文", "zh"), Map.entry("汉语", "zh"), Map.entry("chinese", "zh"),
-            Map.entry("法语", "fr"), Map.entry("德语", "de"), Map.entry("西班牙语", "es"),
-            Map.entry("俄语", "ru"), Map.entry("葡萄牙语", "pt"), Map.entry("意大利语", "it"),
-            Map.entry("泰语", "th"), Map.entry("越南语", "vi"), Map.entry("印尼语", "id"),
-            Map.entry("阿拉伯语", "ar"), Map.entry("印地语", "hi"), Map.entry("荷兰语", "nl"));
-
-    private String normLang(String v) {
-        if (v == null || v.isBlank()) return "auto";
-        String k = v.trim();
-        if ("auto".equalsIgnoreCase(k)) return "auto";
-        String mapped = LANG_CODE.get(k);
-        if (mapped != null) return mapped;
-        mapped = LANG_CODE.get(k.toLowerCase());
-        if (mapped != null) return mapped;
-        // 已是 2 字母代码就直接用，否则交给自动检测
-        return (k.length() == 2 && k.chars().allMatch(Character::isLetter)) ? k.toLowerCase() : "auto";
-    }
-
-    /** 把前端 ASR 选择值解析为 (provider, model, apiKey)。 */
-    private AsrRoute resolveAsr(String selector, Long userId) {
-        String sel = selector == null ? "groq" : selector.trim().toLowerCase();
-        switch (sel) {
-            case "groq":
-                return new AsrRoute("groq", null, settings.effectiveGroqKey(userId));
-            case "groq-turbo":
-                return new AsrRoute("groq", "whisper-large-v3-turbo", settings.effectiveGroqKey(userId));
-            case "qwen":
-                return new AsrRoute("qwen", null, settings.effectiveDashscopeKey(userId));
-            case "glm":
-                return new AsrRoute("glm", null, settings.effectiveZhipuKey(userId));
-            default:
-                if (sel.startsWith("local")) {
-                    String size = sel.contains("-") ? sel.substring(sel.indexOf('-') + 1) : "large-v3";
-                    return new AsrRoute("local", size, null);
-                }
-                return new AsrRoute("groq", null, settings.effectiveGroqKey(userId));
-        }
-    }
-
-    private record AsrRoute(String provider, String model, String apiKey) {
     }
 
     private void update(TranslationTask task, TaskStatus status, int progress) {

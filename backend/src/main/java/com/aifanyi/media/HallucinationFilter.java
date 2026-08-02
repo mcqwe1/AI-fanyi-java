@@ -86,12 +86,15 @@ public final class HallucinationFilter {
         // 避免“水印夹在数字幻觉之间”被当成孤立数字漏过，或跨删除误判复读。
         List<Segment> kept = new ArrayList<>(in.size());
         List<String> keptNorm = new ArrayList<>(in.size());
+        List<String> blackText = new ArrayList<>();
         int blacklisted = 0;
         for (Segment s : in) {
             String spaced = normalizeSpaced(s.text());
             String norm = spaced.replace(" ", "");
             if (norm.isEmpty() || isBlacklisted(norm, spaced)) {
                 blacklisted++;
+                blackText.add(String.format("%s 「%s」",
+                        SubtitleTimingFixer.ts(s.startMs()), s.text()));
                 continue;
             }
             kept.add(s);
@@ -105,6 +108,8 @@ public final class HallucinationFilter {
 
         // 第二步：纯数字连跑 + 复读折叠（均以“时间相接”为前提）
         List<Segment> out = new ArrayList<>(kept.size());
+        List<String> collapsedText = new ArrayList<>();
+        List<String> digitText = new ArrayList<>();
         int collapsed = 0;
         int digitRuns = 0;
         String prevNorm = null;
@@ -117,6 +122,8 @@ public final class HallucinationFilter {
                     && (neighborDigit(kept, digit, i - 1, s)
                         || neighborDigit(kept, digit, i + 1, s))) {
                 digitRuns++;
+                digitText.add(String.format("%s 「%s」",
+                        SubtitleTimingFixer.ts(s.startMs()), s.text()));
                 prevNorm = null;             // 丢弃后重置，避免跨删除把前后同句误判为连续复读
                 run = 0;
                 prevEnd = s.endMs();
@@ -128,6 +135,8 @@ public final class HallucinationFilter {
                 run++;
                 if (run > MAX_CONSECUTIVE_REPEATS) {
                     collapsed++;
+                    collapsedText.add(String.format("%s 「%s」",
+                            SubtitleTimingFixer.ts(s.startMs()), s.text()));
                     prevEnd = s.endMs();
                     continue;
                 }
@@ -141,6 +150,16 @@ public final class HallucinationFilter {
         if (blacklisted + collapsed + digitRuns > 0) {
             log.info("反幻觉过滤：黑名单 {} 条，复读折叠 {} 条，数字连跑 {} 条（{} → {} 条）",
                     blacklisted, collapsed, digitRuns, in.size(), out.size());
+            // 明细全量打印：漏翻排查时要能看出删掉的到底是幻觉还是真台词
+            for (String b : blackText) {
+                log.info("  [丢弃-黑名单] {}", b);
+            }
+            for (String c : collapsedText) {
+                log.info("  [丢弃-复读] {}", c);
+            }
+            for (String d : digitText) {
+                log.info("  [丢弃-数字连跑] {}", d);
+            }
         }
         return out;
     }

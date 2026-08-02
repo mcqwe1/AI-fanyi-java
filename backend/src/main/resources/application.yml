@@ -1,5 +1,6 @@
 server:
-  port: 8080
+  # 便携版:start.bat 可用 AIFANYI_PORT 覆盖,避免与目标机器上其他服务冲突
+  port: ${AIFANYI_PORT:8080}
   tomcat:
     # 拒收超大请求体时不直接 RST 连接（否则前端只看到 ERR_CONNECTION_RESET）
     max-swallow-size: -1
@@ -8,22 +9,24 @@ spring:
   application:
     name: aifanyi-backend
   datasource:
-    url: jdbc:mysql://localhost:3306/aifanyi?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
-    username: ${DB_USER:root}
-    password: ${DB_PASSWORD:aifanyi123}
-    driver-class-name: com.mysql.cj.jdbc.Driver
-  data:
-    redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
+    # 便携版默认:H2 嵌入式文件库,MySQL 兼容模式,数据随 data 目录整体拷贝。
+    # NON_KEYWORDS=USER:表名 user 在 H2 里是保留字;DB_CLOSE_ON_EXIT=FALSE 交给 Spring 优雅关闭。
+    # 如需连外部 MySQL,用 AIFANYI_DB_URL/USER/PASSWORD/DRIVER 四个环境变量整体覆盖。
+    url: ${AIFANYI_DB_URL:jdbc:h2:file:${AIFANYI_STORAGE_ROOT:${user.dir}/data}/db/aifanyi;MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;NON_KEYWORDS=USER;DB_CLOSE_ON_EXIT=FALSE}
+    username: ${AIFANYI_DB_USER:sa}
+    password: ${AIFANYI_DB_PASSWORD:}
+    driver-class-name: ${AIFANYI_DB_DRIVER:org.h2.Driver}
+  sql:
+    init:
+      # schema.sql 全程 IF NOT EXISTS,幂等,每次启动都执行(首启建库,升级加表)
+      mode: always
   servlet:
     multipart:
       # -1 = 不限大小（视频可能很大；真正约束是磁盘空间）
       max-file-size: -1
       max-request-size: -1
-      # 临时缓存目录放到与存储同盘（默认 D:），避免默认系统临时盘(C:)空间不足/跨盘拷贝；
-      # 同盘时 transferTo 退化为秒级 rename，而非再拷一遍整文件。
-      location: ${AIFANYI_STORAGE_ROOT:D:/aifanyi/data}/.uploadtmp
+      # 临时缓存目录放到与存储同盘，避免跨盘拷贝；同盘时 transferTo 退化为秒级 rename
+      location: ${AIFANYI_STORAGE_ROOT:${user.dir}/data}/.uploadtmp
 
 mybatis-plus:
   configuration:
@@ -39,13 +42,14 @@ mybatis-plus:
 # ---- 应用自定义配置 ----
 aifanyi:
   jwt:
-    # 生产务必用环境变量覆盖；至少 32 字节
+    # start.bat 每台机器首启生成随机 secret 存 data/jwt.secret 并注入;此处仅兜底
     secret: ${AIFANYI_JWT_SECRET:dev-only-secret-change-me-please-32bytes-minimum-0123456789}
     expire-minutes: 1440
   storage:
-    # 视频/音频/字幕等文件存储根目录
-    root: ${AIFANYI_STORAGE_ROOT:D:/aifanyi/data}
+    # 视频/音频/字幕等文件存储根目录;便携版由 start.bat 指到包内 data\
+    root: ${AIFANYI_STORAGE_ROOT:${user.dir}/data}
   ffmpeg:
+    # 便携版由 start.bat 指到包内 bin\ffmpeg.exe;兜底走 PATH
     path: ${FFMPEG_PATH:ffmpeg}
   asr:
     groq:
@@ -61,6 +65,24 @@ aifanyi:
     disable-thinking: ${LLM_DISABLE_THINKING:true}
     batch-size: ${LLM_BATCH_SIZE:40}
     concurrency: ${LLM_CONCURRENCY:8}
+  tts:
+    # 配音逐行合成并发数（提速关键：300 行字幕串行要 10~30 分钟，6 路并发降到 2~5 分钟）
+    concurrency: ${TTS_CONCURRENCY:6}
+  agent:
+    # Agent 模式（实验）harness 约束参数。子池必须独立于 taskExecutor(core=2)，否则并发时死锁
+    concurrency: ${AGENT_CONCURRENCY:8}
+    max-sub-agents: ${AGENT_MAX_SUB_AGENTS:4}
+    sub-agent-timeout-sec: ${AGENT_SUB_TIMEOUT_SEC:30}
+    fanout-deadline-sec: ${AGENT_FANOUT_DEADLINE_SEC:90}
+    scene-timeout-sec: ${AGENT_SCENE_TIMEOUT_SEC:20}
+    max-search-per-agent: ${AGENT_MAX_SEARCH:2}
+    max-tools-per-agent: ${AGENT_MAX_TOOLS:3}
+    digest-chars: ${AGENT_DIGEST_CHARS:6000}
+    # ⑧ 滚动窗口：组内串行保上下文连续，组间并发保速度（1=全串行，质量最高最慢）
+    translate-group-size: ${AGENT_TRANSLATE_GROUP:5}
+    context-overlap: ${AGENT_CONTEXT_OVERLAP:4}
+    qdrant-url: ${QDRANT_URL:http://localhost:6333}
+    qdrant-collection: ${QDRANT_COLLECTION:aifanyi_terms}
 
 logging:
   level:
