@@ -7,7 +7,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        // 开发时可用 AIFANYI_API 指到别的后端端口（如并行跑第二个实例调试）
+        target: process.env.AIFANYI_API || 'http://localhost:8080',
         changeOrigin: true
       }
     }

@@ -7,6 +7,7 @@ import com.aifanyi.domain.MediaKind;
 import com.aifanyi.domain.TaskMode;
 import com.aifanyi.domain.TaskStatus;
 import com.aifanyi.entity.Subtitle;
+import com.aifanyi.entity.KbProject;
 import com.aifanyi.entity.TranslationTask;
 import com.aifanyi.mapper.SubtitleMapper;
 import com.aifanyi.mapper.TranslationTaskMapper;
@@ -32,9 +33,11 @@ public class TaskService {
 
     private final TranslationTaskMapper taskMapper;
     private final SubtitleMapper subtitleMapper;
+    private final com.aifanyi.mapper.KbProjectMapper projectMapper;
     private final StorageService storage;
     private final TaskPipeline pipeline;
     private final com.aifanyi.agent.AgentPipeline agentPipeline;
+    private final com.aifanyi.media.FfmpegService ffmpeg;
 
     /** 风格提示词字符上限（与前端 textarea maxlength、DB 列宽一致）。 */
     private static final int STYLE_PROMPT_MAX_CHARS = 500;
@@ -42,10 +45,14 @@ public class TaskService {
     /**
      * 创建任务、保存上传的视频/音频并异步启动流水线。
      * 音频任务：流水线完全一致（ffmpeg 统一转 16k 单声道再转写），仅强制不可烧录。
+     *
+     * @param subtitleFile 可选的原文字幕（srt/vtt）。带了它就跳过抽音频与语音识别，
+     *                     直接翻译这份字幕——实测能把 16.8 分钟视频的 140s 压到 10s 量级。
      */
     public Long createAndStart(MultipartFile file, Long userId, String mode, Long projectId,
                                String sourceLang, String targetLang, String asrProvider,
-                               String llmModel, boolean burn, boolean bilingual, String stylePrompt) {
+                               String llmModel, boolean burn, boolean bilingual, String stylePrompt,
+                               String glossaryProjectIds, MultipartFile subtitleFile) {
         if (file == null || file.isEmpty()) {
             throw new BizException("上传文件为空");
         }
@@ -58,6 +65,23 @@ public class TaskService {
         if (kind == MediaKind.TEXT && !agent) {
             // 文本链目前只在 Agent 模式接入；普通文本翻译走 /api/translate（同步接口）
             throw new BizException("文本文件请使用「AI 文本翻译」模式，或选择「全能 AI 翻译」");
+        }
+        boolean hasSubtitle = subtitleFile != null && !subtitleFile.isEmpty();
+        if (hasSubtitle) {
+            if (kind == MediaKind.TEXT) {
+                throw new BizException("文本任务本身就是文字，不需要再带字幕文件");
+            }
+            if (!com.aifanyi.media.SubtitleParser.isSubtitleFile(subtitleFile.getOriginalFilename())) {
+                throw new BizException("自带字幕只支持 .srt / .vtt 文件");
+            }
+        }
+        // projectId = 新词入库目标。必须校验归属：它会被直接写进术语库，
+        // 不校验等于任何人都能往别人的术语库里塞词。
+        if (projectId != null) {
+            KbProject p = projectMapper.selectById(projectId);
+            if (p == null || !userId.equals(p.getUserId())) {
+                throw new BizException("指定的术语库不存在或不属于你");
+            }
         }
         TranslationTask task = new TranslationTask();
         task.setUserId(userId);
@@ -73,6 +97,7 @@ public class TaskService {
         task.setBurnSubtitle(kind == MediaKind.VIDEO && burn ? 1 : 0);
         task.setBilingual(bilingual ? 1 : 0);
         task.setStylePrompt(normalizeStylePrompt(stylePrompt));
+        task.setGlossaryProjectIds(normalizeGlossaryIds(glossaryProjectIds));
         task.setOriginalFilename(file.getOriginalFilename());
         task.setProgress(0);
         taskMapper.insert(task);
@@ -80,6 +105,11 @@ public class TaskService {
         try {
             Path saved = storage.saveUpload(file, task.getId());
             task.setVideoPath(saved.toString());
+            if (hasSubtitle) {
+                Path sub = storage.resolve(task.getId(), "supplied" + ext(subtitleFile.getOriginalFilename()));
+                subtitleFile.transferTo(sub);
+                task.setSubtitleSourcePath(sub.toString());
+            }
             taskMapper.updateById(task);
         } catch (Exception e) {
             throw new BizException("保存上传文件失败: " + e.getMessage());
@@ -87,6 +117,15 @@ public class TaskService {
 
         dispatch(task.getMode(), task.getId());
         return task.getId();
+    }
+
+    /** 取扩展名（带点，小写）；没有扩展名回退 .srt。 */
+    private static String ext(String filename) {
+        if (filename == null) {
+            return ".srt";
+        }
+        int dot = filename.lastIndexOf('.');
+        return dot < 0 ? ".srt" : filename.substring(dot).toLowerCase(java.util.Locale.ROOT);
     }
 
     /**
@@ -237,6 +276,50 @@ public class TaskService {
         return subs.size();
     }
 
+    /**
+     * 任务封面（工作台「最近项目」卡片）：视频=某一帧、音频=波形图。
+     * 首次请求时用 ffmpeg 生成并缓存在任务目录，之后直接命中文件。
+     * TEXT 任务或源文件已被清理时返回 null（前端退回文本样式卡片）。
+     */
+    public Path ensureCover(TranslationTask task) {
+        boolean video = MediaKind.VIDEO.name().equals(task.getMediaType());
+        boolean audio = MediaKind.AUDIO.name().equals(task.getMediaType());
+        if (!video && !audio) {
+            return null;
+        }
+        Path out = storage.resolve(task.getId(), video ? "cover.jpg" : "cover.png");
+        if (Files.exists(out)) {
+            return out;
+        }
+        if (task.getVideoPath() == null) {
+            return null;
+        }
+        Path src = Path.of(task.getVideoPath());
+        if (!Files.exists(src)) {
+            return null;
+        }
+        // 同一任务并发首次请求会同时起 ffmpeg 写同一文件，按任务串行化
+        synchronized (("aifanyi-cover-" + task.getId()).intern()) {
+            if (Files.exists(out)) {
+                return out;
+            }
+            try {
+                if (video) {
+                    // 跳过片头黑场：取 10% 处，上限 10 秒
+                    double dur = ffmpeg.probeDurationSec(src);
+                    double seek = dur > 0 ? Math.min(10, dur * 0.1) : 1;
+                    ffmpeg.coverFrame(src, out, seek);
+                } else {
+                    ffmpeg.coverWaveform(src, out);
+                }
+                return Files.exists(out) ? out : null;
+            } catch (Exception e) {
+                log.warn("任务 {} 封面生成失败: {}", task.getId(), e.getMessage());
+                return null;
+            }
+        }
+    }
+
     /** 归一化风格提示词：空白→null（不启用），超长直接报错（与 DB 列宽一致）。 */
     static String normalizeStylePrompt(String stylePrompt) {
         if (stylePrompt == null || stylePrompt.isBlank()) {
@@ -247,5 +330,20 @@ public class TaskService {
             throw new BizException("风格提示词过长（" + s.length() + " 字，上限 " + STYLE_PROMPT_MAX_CHARS + "）");
         }
         return s;
+    }
+
+    /** 归一化勾选的术语库 id 串：只留合法数字、去重，空/非法→null（不套用）。 */
+    static String normalizeGlossaryIds(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        java.util.LinkedHashSet<String> ids = new java.util.LinkedHashSet<>();
+        for (String p : raw.split(",")) {
+            String t = p.trim();
+            if (t.matches("\\d+") && !"0".equals(t)) {
+                ids.add(t);
+            }
+        }
+        return ids.isEmpty() ? null : String.join(",", ids);
     }
 }

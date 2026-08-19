@@ -22,7 +22,9 @@ public class AuthDtos {
             Long userId,
             String username,
             String nickname,
-            String token
+            String role,
+            String token,
+            String avatar
     ) {
     }
 }

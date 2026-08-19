@@ -51,7 +51,7 @@ public class GroqWhisperProvider implements AsrProvider {
         String apiKey = ctx == null ? null : ctx.apiKey();
         String model = (ctx != null && StringUtils.hasText(ctx.model())) ? ctx.model() : cfg.getModel();
         if (!StringUtils.hasText(apiKey)) {
-            throw new BizException("未配置 Groq API Key，请在「设置 → API 密钥」填写");
+            throw new BizException("未配置 Groq API Key，请在「设置 → API 配置 → 语音识别（ASR）」填写");
         }
 
         long size;

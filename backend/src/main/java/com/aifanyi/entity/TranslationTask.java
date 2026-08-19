@@ -40,6 +40,12 @@ public class TranslationTask {
     private String videoPath;
     private String audioPath;
     private String srtPath;
+
+    /**
+     * 用户随任务上传的原文字幕（srt/vtt）绝对路径。
+     * 有值 = 跳过抽音频与语音识别，直接拿它的时间轴与文本去翻译。
+     */
+    private String subtitleSourcePath;
     private String outputVideoPath;
 
     /** TTS 配音：音色 / 语速 / 是否保留原声做背景 / 配音成品视频路径 */
@@ -68,6 +74,9 @@ public class TranslationTask {
 
     /** 本任务翻译风格提示词（空=不指定风格） */
     private String stylePrompt;
+
+    /** 用户勾选的术语库（kb_project id 逗号分隔，空=不套用）；术语以提示词注入翻译 */
+    private String glossaryProjectIds;
 
     private Integer progress;
     private String errorMsg;

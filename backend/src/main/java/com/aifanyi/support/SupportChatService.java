@@ -61,9 +61,15 @@ public class SupportChatService {
 
         LlmConfig cfg = settings.effectiveLlm(userId);
         if (cfg == null || cfg.apiKey() == null || cfg.apiKey().isBlank()) {
-            return new Reply("我需要借助 AI 翻译模型才能回答问题，而它还没配置。请到「设置 → API 密钥」"
-                    + "填好 AI 翻译模型（推荐 DeepSeek：Base URL 填 https://api.deepseek.com、"
-                    + "API Key 填 sk- 开头的钥匙、模型填 deepseek-v4）——这也是软件能开始翻译的第一步。",
+            return new Reply("我需要借助 AI 大模型才能回答问题，而它还没配置。请到「设置 → API 配置 → 大语言模型」"
+                    + "添加一个模型服务（推荐 DeepSeek：注册后创建 sk- 开头的 API Key，模型选 deepseek-chat）"
+                    + "——这也是软件能开始翻译的第一步。",
+                    sources);
+        }
+        if (cfg.isMt()) {
+            return new Reply("当前默认的翻译服务是传统机器翻译引擎（谷歌翻译/微软翻译/DeepL），"
+                    + "它能翻译但不能对话，所以智能客服用不了它。想用客服的话，"
+                    + "请到「设置 → API 配置 → 大语言模型」把默认服务切到某个大模型服务商（如 DeepSeek）。",
                     sources);
         }
         try {
@@ -78,7 +84,7 @@ public class SupportChatService {
         } catch (Exception e) {
             log.warn("客服回答失败: {}", e.toString());
             return new Reply("暂时联系不上 AI 模型（" + brief(e.getMessage())
-                    + "）。请检查「设置 → API 密钥」里的翻译模型配置与网络后重试。", sources);
+                    + "）。请检查「设置 → API 配置 → 大语言模型」里的模型服务配置与网络后重试。", sources);
         }
     }
 
@@ -178,15 +184,18 @@ public class SupportChatService {
     private String ask(LlmConfig cfg, String question, List<Map<String, String>> history,
                        List<HelpChunker.Chunk> hits) throws Exception {
         StringBuilder sys = new StringBuilder();
-        sys.append("你是「AI 视频翻译」软件的智能客服。根据下面的手册片段回答用户的使用问题。\n")
+        sys.append("你是「狐译」软件的智能客服。根据下面的手册片段回答用户的使用问题。\n")
                 .append("要求：\n")
                 .append("1. 用中文回答，直接给操作步骤，简短清楚，不堆废话；\n")
                 .append("2. 手册片段里没有的信息不要编造——如实说手册没覆盖，")
-                .append("并建议用户去「设置」或右上角「使用教程」页看看；\n")
+                .append("并建议用户去「设置」或侧边栏「帮助与反馈」页看看；\n")
                 .append("3. 与本软件无关的问题，礼貌说明你只负责本软件的使用咨询。\n\n")
                 .append("【手册片段】\n");
         for (HelpChunker.Chunk c : hits) {
             sys.append(c.text()).append("\n\n");
+        }
+        if (cfg.isClaude()) {
+            return askClaude(cfg, sys.toString(), question, history);
         }
 
         ObjectNode req = mapper.createObjectNode();
@@ -209,6 +218,34 @@ public class SupportChatService {
         }
         JsonNode root = mapper.readTree(r.body());
         return root.path("choices").path(0).path("message").path("content").asText("");
+    }
+
+    /** Claude（Anthropic messages 协议）分支：system 走顶层字段，历史照常拼 messages。 */
+    private String askClaude(LlmConfig cfg, String system, String question,
+                             List<Map<String, String>> history) throws Exception {
+        ObjectNode req = mapper.createObjectNode();
+        req.put("model", cfg.model());
+        req.put("max_tokens", 2048);
+        req.put("temperature", 0.3);
+        req.put("system", system);
+        ArrayNode messages = req.putArray("messages");
+        appendHistory(messages, history);
+        messages.addObject().put("role", "user").put("content", question);
+
+        AgentHttp.Result r = http.postJson(
+                AgentHttp.join(cfg.baseUrl(), "/messages"),
+                Map.of("x-api-key", cfg.apiKey(), "anthropic-version", "2023-06-01"),
+                mapper.writeValueAsString(req), TIMEOUT_MS);
+        if (!r.ok()) {
+            throw new IllegalStateException("HTTP " + r.status());
+        }
+        JsonNode root = mapper.readTree(r.body());
+        for (JsonNode block : root.path("content")) {
+            if ("text".equals(block.path("type").asText())) {
+                return block.path("text").asText("");
+            }
+        }
+        return root.path("content").path(0).path("text").asText("");
     }
 
     /** 历史消息只收 user/assistant 两种角色、只留最近几轮（防把 system 混进来或撑爆上下文）。 */

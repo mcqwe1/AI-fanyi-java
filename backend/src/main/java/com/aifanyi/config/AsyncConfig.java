@@ -21,9 +21,9 @@ public class AsyncConfig {
     @Bean("taskExecutor")
     public Executor taskExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(2);
-        executor.setMaxPoolSize(4);
-        executor.setQueueCapacity(50);
+        executor.setCorePoolSize(8);
+        executor.setMaxPoolSize(16);
+        executor.setQueueCapacity(500);
         executor.setThreadNamePrefix("aifanyi-task-");
         executor.initialize();
         return executor;
@@ -32,9 +32,9 @@ public class AsyncConfig {
     @Bean("mediaExecutor")
     public Executor mediaExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(2);
-        executor.setMaxPoolSize(4);
-        executor.setQueueCapacity(50);
+        executor.setCorePoolSize(8);
+        executor.setMaxPoolSize(16);
+        executor.setQueueCapacity(500);
         executor.setThreadNamePrefix("aifanyi-media-");
         executor.initialize();
         return executor;

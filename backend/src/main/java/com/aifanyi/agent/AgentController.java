@@ -17,7 +17,9 @@ import java.util.List;
 
 /**
  * Agent 运行详情（harness 评估与观测层的对外出口）。
- * 前端运行详情面板据此展示阶段、Trace 时间线、抽出的术语与置信度分档。
+ * 前端运行详情面板据此展示阶段、Trace 时间线与抽出的术语。
+ * 2026-08 需求改版：删除「确认术语」接口——置信度 ≥0.8 自动入库、以下不落库，
+ * 用户不再感知置信度，也无需手动确认。
  */
 @RestController
 @RequestMapping("/api/tasks/{id}/agent")

@@ -47,6 +47,7 @@ public class TaskController {
     @PostMapping
     public R<CreateTaskResp> create(
             @RequestPart("file") MultipartFile file,
+            @RequestPart(value = "subtitleFile", required = false) MultipartFile subtitleFile,
             @RequestParam(defaultValue = "NORMAL") String mode,
             @RequestParam(required = false) Long projectId,
             @RequestParam(defaultValue = "auto") String sourceLang,
@@ -55,10 +56,12 @@ public class TaskController {
             @RequestParam(required = false) String llmModel,
             @RequestParam(defaultValue = "false") boolean burnSubtitle,
             @RequestParam(defaultValue = "false") boolean bilingual,
-            @RequestParam(required = false) String stylePrompt) {
+            @RequestParam(required = false) String stylePrompt,
+            @RequestParam(required = false) String glossaryProjectIds) {
         Long uid = SecurityUtils.currentUserId();
         Long taskId = taskService.createAndStart(file, uid, mode, projectId, sourceLang, targetLang,
-                asrProvider, llmModel, burnSubtitle, bilingual, stylePrompt);
+                asrProvider, llmModel, burnSubtitle, bilingual, stylePrompt, glossaryProjectIds,
+                subtitleFile);
         return R.ok(new CreateTaskResp(taskId));
     }
 
@@ -73,6 +76,25 @@ public class TaskController {
     public R<TaskVO> detail(@PathVariable Long id) {
         Long uid = SecurityUtils.currentUserId();
         return R.ok(toVO(taskService.getOwned(id, uid)));
+    }
+
+    /**
+     * 任务封面（工作台卡片）：视频=抽帧 jpg、音频=波形 png，生成后缓存。
+     * img 标签带不了 Authorization 头，前端以 ?access_token= 携带凭证（JwtAuthFilter 支持）。
+     */
+    @GetMapping("/{id}/thumbnail")
+    public ResponseEntity<FileSystemResource> thumbnail(@PathVariable Long id) {
+        Long uid = SecurityUtils.currentUserId();
+        TranslationTask task = taskService.getOwned(id, uid);
+        Path cover = taskService.ensureCover(task);
+        if (cover == null) {
+            return ResponseEntity.notFound().build();
+        }
+        MediaType mt = cover.toString().endsWith(".png") ? MediaType.IMAGE_PNG : MediaType.IMAGE_JPEG;
+        return ResponseEntity.ok()
+                .contentType(mt)
+                .header(HttpHeaders.CACHE_CONTROL, "private, max-age=86400")
+                .body(new FileSystemResource(cover));
     }
 
     /** 删除任务（含字幕记录与磁盘文件）。 */

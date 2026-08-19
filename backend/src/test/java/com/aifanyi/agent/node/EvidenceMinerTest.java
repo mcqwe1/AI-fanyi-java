@@ -35,10 +35,40 @@ class EvidenceMinerTest {
         assertEquals(0, EvidenceMiner.countOccurrences("text", ""));
     }
 
+    /**
+     * <b>词边界</b>（2026-08 修）：旧版直接数子串，"aa" 在 "aaaa" 里算 2 次。
+     * 放到真实素材上就是：数 "API" 会把 rapid / capital 算进去，
+     * 数 "AI" 会把 again / said / training / maintain 全算进去——
+     * 英文素材里短词的次数虚高，直接污染 TermTriage 的收录判定。
+     */
     @Test
-    void countsNonOverlapping() {
-        // "aa" 在 "aaaa" 中不重叠地出现 2 次
-        assertEquals(2, EvidenceMiner.countOccurrences("aaaa", "aa"));
+    void latinTermsRequireWordBoundary() {
+        assertEquals(0, EvidenceMiner.countOccurrences("aaaa", "aa"), "子串不再算出现");
+        assertEquals(0, EvidenceMiner.countOccurrences(
+                "It rained rapidly on the capital city.", "API"));
+        assertEquals(0, EvidenceMiner.countOccurrences(
+                "He said again that training helps maintain focus.", "AI"));
+
+        // 真正作为独立词出现时正常计数，且大小写不敏感
+        assertEquals(2, EvidenceMiner.countOccurrences("The API is fine. api again.", "API"));
+        assertEquals(1, EvidenceMiner.countOccurrences("We use AI, not AIDS.", "AI"));
+        // 标点紧邻不影响
+        assertEquals(3, EvidenceMiner.countOccurrences("(API), API. \"API\"", "API"));
+    }
+
+    /** 含非单词字符的术语也要能数对（\\b 在这类词上会失效，故用 lookaround）。 */
+    @Test
+    void countsTermsWithPunctuation() {
+        assertEquals(2, EvidenceMiner.countOccurrences("GPT-4 beats GPT-4 sometimes", "GPT-4"));
+        assertEquals(1, EvidenceMiner.countOccurrences("built on .NET today", ".NET"));
+        assertEquals(1, EvidenceMiner.countOccurrences("e-commerce is big", "e-commerce"));
+    }
+
+    /** 中日韩没有词间空格，词边界概念不适用，继续走子串计数。 */
+    @Test
+    void cjkStillCountsSubstrings() {
+        assertEquals(2, EvidenceMiner.countOccurrences("情绪敏捷力很重要，情绪敏捷力可练", "情绪敏捷力"));
+        assertEquals(2, EvidenceMiner.countOccurrences("这是茶道，那也是茶道", "茶道"));
     }
 
     // ---- 中文定义句 ----

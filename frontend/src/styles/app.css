@@ -43,6 +43,7 @@ body { background: var(--bg); }
 .tile-purple { background: linear-gradient(135deg, #a78bfa, #8b5cf6); }
 .tile-orange { background: linear-gradient(135deg, #fbbf24, #f59e0b); }
 .tile-rose   { background: linear-gradient(135deg, #f472b6, #ec4899); }
+.tile-cyan   { background: linear-gradient(135deg, #22d3ee, #06b6d4); }
 
 /* 模式主按钮配色 */
 .btn-mode { border: none !important; color: #fff !important; width: 100%; border-radius: 8px !important; }
@@ -51,6 +52,7 @@ body { background: var(--bg); }
 .btn-purple { background: linear-gradient(90deg, #9d71ff, #7c4dff) !important; }
 .btn-orange { background: linear-gradient(90deg, #fb9e3c, #f2820a) !important; }
 .btn-rose   { background: linear-gradient(90deg, #f45fa4, #e0338a) !important; }
+.btn-cyan   { background: linear-gradient(90deg, #17c3e3, #0899b8) !important; }
 
 /* 状态色小字 */
 .err { color: #f56c6c; font-size: 12px; }

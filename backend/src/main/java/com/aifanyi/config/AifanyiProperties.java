@@ -63,8 +63,10 @@ public class AifanyiProperties {
         private boolean disableThinking = true;
         /** 每批翻译行数（越大请求数越少；index 对齐保证大批次也能精确回填） */
         private int batchSize = 40;
-        /** 并发批次数 */
+        /** 用户没给模型服务单独配并发时的默认值 */
         private int concurrency = 8;
+        /** 所有任务共用的在途请求上限：多任务并跑时的兜底，防端点被打爆/触发限流 */
+        private int maxTotalConcurrency = 48;
     }
 
     @Data
@@ -92,8 +94,13 @@ public class AifanyiProperties {
         private int maxToolsPerAgent = 3;
         /** 喂给子 Agent 的摘要字符上限（全文出现次数由代码统计，不靠摘要） */
         private int digestChars = 6000;
-        /** ⑧ 滚动窗口分组大小：组内串行带完整上下文，组间并发。1=全串行 */
-        private int translateGroupSize = 5;
+        /**
+         * ⑧ 滚动窗口的上下文档位：
+         * source = 只带前文<b>原文</b>（默认）。前文原文是上一批的输入、开跑前就已知，
+         *          于是全部批次可以一起并发——实测 254 行从 22s 降到 5s 量级。
+         * full   = 带前文原文<b>+译文</b>，最连贯但必须等上一批出结果，只能组内串行。
+         */
+        private String contextMode = "source";
         /** ⑧ 上下文重叠句数（前 N 句原文） */
         private int contextOverlap = 4;
         /** Qdrant 地址（用户设置留空时的默认值） */

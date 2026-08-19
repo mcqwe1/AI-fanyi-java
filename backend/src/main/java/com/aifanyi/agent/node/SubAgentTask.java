@@ -378,7 +378,7 @@ public final class SubAgentTask implements Callable<SubAgentResult> {
                 out.add(d.withVerifiedAuthority(null, downgradeIfClaimed(d)));
                 continue;
             }
-            String verified = cfg.verifyAuthorityUrl(d.authorityUrl(), hs);
+            String verified = cfg.verifyAuthorityUrl(d.authorityUrl(), hs, d.source(), d.target());
             out.add(verified.isBlank()
                     ? d.withVerifiedAuthority("", downgradeIfClaimed(d))
                     : d.withVerifiedAuthority(verified, d.strategy()));

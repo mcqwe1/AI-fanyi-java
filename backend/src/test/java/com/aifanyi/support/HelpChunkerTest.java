@@ -47,6 +47,21 @@ class HelpChunkerTest {
     }
 
     @Test
+    void 无空行的长列表按行再切_条目不被切开() {
+        String item = "- **条目**：" + "说".repeat(120) + "\n";
+        List<HelpChunker.Chunk> out = HelpChunker.chunk("## 用法\n" + item.repeat(8));
+        assertThat(out.size()).isGreaterThanOrEqualTo(2);
+        for (HelpChunker.Chunk c : out) {
+            assertThat(c.title()).isEqualTo("用法");
+            assertThat(c.body().length()).isLessThanOrEqualTo(900);
+            for (String line : c.body().split("\n")) {
+                // 行是切分边界：每行都还是一条完整条目，没有从中间断开
+                assertThat(line.strip()).startsWith("- **条目**：");
+            }
+        }
+    }
+
+    @Test
     void 关键词打分_标题命中权重更高() {
         HelpChunker.Chunk titleHit = new HelpChunker.Chunk("配音怎么用", "内容与问题无关。");
         HelpChunker.Chunk bodyHit = new HelpChunker.Chunk("别的", "这里提到配音一次。");

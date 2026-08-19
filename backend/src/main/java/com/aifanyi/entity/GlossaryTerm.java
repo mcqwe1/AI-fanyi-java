@@ -7,7 +7,7 @@ import java.time.LocalDateTime;
 
 /**
  * 术语表条目，属于某个 KB 系列项目。
- * origin: auto=模型联网抽取（待审核） / manual=人工录入 / agent=Agent 模式产出。
+ * origin: manual=人工录入 / auto=模型自动产出（KB 联网抽取与 Agent 模式统一归 auto）。
  * <p>Agent 模式追加的元数据列（KB 模式不写，全部可空）：置信度、状态机档位、证据、
  * 采用的译法策略、来源档案、向量同步标记。
  */
@@ -21,7 +21,6 @@ public class GlossaryTerm {
     private Long projectId;
     private String sourceTerm;
     private String targetTerm;
-    private String category;
     private String note;
     private String origin;
     private Integer enabled;

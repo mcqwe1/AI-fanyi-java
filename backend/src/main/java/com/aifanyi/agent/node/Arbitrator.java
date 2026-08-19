@@ -10,7 +10,10 @@ import java.text.Normalizer;
 import java.util.*;
 
 /**
- * ⑤ 主 Agent · 汇总仲裁：去重 + 冲突处理 + 置信度算分。
+ * ⑤ 主 Agent · 汇总仲裁：去重 + 冲突处理。
+ *
+ * <p>2026-08 重构后本类<b>不再算分</b>——「存不存库、启不启用」由 {@link TermTriage} 按规则判定。
+ * 这里只负责把多个专家的候选合并成一张确定性的唯一术语表。
  *
  * <p><b>本类是全流程唯一的删除点</b>——其余节点只增不删，这样「术语为什么没了」
  * 永远只需要查一个地方。
@@ -21,15 +24,13 @@ import java.util.*;
  *   分高者 → 有权威证据者 → 原始形态更长者（保 API 而非 api）→ 档案序号小者
  * </pre>
  *
- * <p>冲突（同源词不同译且分数接近）<b>不再花一次 LLM 仲裁</b>——标为待确认交用户，
- * 在已有术语库 UI 里一键解决。一个已经花掉 2N+1 次调用的功能，不该为此再加一次。
+ * <p>冲突（同源词不同译且票数接近）<b>不花一次 LLM 仲裁</b>——标记后交 {@link TermTriage}，
+ * 由它统一处置为「入库备选」，用户在术语库 UI 里一键裁决。
+ * 一个已经花掉 2N+1 次调用的功能，不该为此再加一次。
  */
 @Slf4j
 @Component
 public class Arbitrator {
-
-    /** 分数差小于此值视为「势均力敌」→ 记冲突交用户，而非强行择一 */
-    private static final double CONFLICT_DELTA = 0.10;
 
     /**
      * 仲裁全部子 Agent 的产出。
@@ -71,8 +72,20 @@ public class Arbitrator {
             }
             out.add(t);
         }
-        // 分数降序：前端展示与后续截断都按重要性排
-        out.sort((a, b) -> Double.compare(b.confidence(), a.confidence()));
+        // 证据强度降序：权威 → 多方一致 → 高频 → 原文字典序（最后一级保证同一输入永远同一顺序）。
+        // 旧版按置信度分数排，分数删掉后改用它的构成要素直接排，展示与截断的效果一致。
+        out.sort((a, b) -> {
+            int byAuthority = Boolean.compare(b.hasAuthority(), a.hasAuthority());
+            if (byAuthority != 0) {
+                return byAuthority;
+            }
+            int byAgree = Integer.compare(b.agreements(), a.agreements());
+            if (byAgree != 0) {
+                return byAgree;
+            }
+            int byOcc = Integer.compare(b.occurrences(), a.occurrences());
+            return byOcc != 0 ? byOcc : a.source().compareTo(b.source());
+        });
         log.info("仲裁完成：{} 条候选 → {} 条唯一术语（合并 {} 条重复，{} 条存在译法冲突）",
                 results.stream().mapToInt(r -> r.terms().size()).sum(), out.size(), merged, conflicted);
         return out;
@@ -110,8 +123,8 @@ public class Arbitrator {
             }
         }
 
-        boolean anyDegraded = cands.stream().allMatch(c -> c.degraded);
-        ScoredTerm t = ScoredTerm.builder()
+        boolean allDegraded = cands.stream().allMatch(c -> c.degraded);
+        return ScoredTerm.builder()
                 .source(best.d.source())
                 .sourceNorm(norm)
                 .target(best.d.target())
@@ -125,9 +138,8 @@ public class Arbitrator {
                 .agreements(winners.size())
                 .conflicts(conflicts)
                 .profileCode(best.d.profileCode())
-                .degraded(anyDegraded)
+                .degraded(allDegraded)
                 .build();
-        return t.withConfidence(ConfidenceScorer.score(t));
     }
 
     /**

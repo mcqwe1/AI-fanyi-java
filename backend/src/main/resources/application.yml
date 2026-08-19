@@ -4,18 +4,29 @@ server:
   tomcat:
     # 拒收超大请求体时不直接 RST 连接（否则前端只看到 ERR_CONNECTION_RESET）
     max-swallow-size: -1
+    threads:
+      max: ${TOMCAT_MAX_THREADS:200}
+      min-spare: ${TOMCAT_MIN_SPARE_THREADS:20}
+    max-connections: ${TOMCAT_MAX_CONNECTIONS:1000}
+    accept-count: ${TOMCAT_ACCEPT_COUNT:500}
+    connection-timeout: ${TOMCAT_CONNECTION_TIMEOUT:30s}
 
 spring:
   application:
     name: aifanyi-backend
   datasource:
     # 便携版默认:H2 嵌入式文件库,MySQL 兼容模式,数据随 data 目录整体拷贝。
-    # NON_KEYWORDS=USER:表名 user 在 H2 里是保留字;DB_CLOSE_ON_EXIT=FALSE 交给 Spring 优雅关闭。
+    # NON_KEYWORDS=USER:表名 user 在 H2 里是保留字;DB_CLOSE_ON_EXIT=FALSE 交给 Spring 优雅关闭;WRITE_DELAY=0 让每次提交立即落盘，防止 stop.bat 强制结束进程后回滚最近保存的数据。
     # 如需连外部 MySQL,用 AIFANYI_DB_URL/USER/PASSWORD/DRIVER 四个环境变量整体覆盖。
-    url: ${AIFANYI_DB_URL:jdbc:h2:file:${AIFANYI_STORAGE_ROOT:${user.dir}/data}/db/aifanyi;MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;NON_KEYWORDS=USER;DB_CLOSE_ON_EXIT=FALSE}
+    url: ${AIFANYI_DB_URL:jdbc:h2:file:${AIFANYI_STORAGE_ROOT:${user.dir}/data}/db/aifanyi;MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;NON_KEYWORDS=USER;DB_CLOSE_ON_EXIT=FALSE;WRITE_DELAY=0}
     username: ${AIFANYI_DB_USER:sa}
     password: ${AIFANYI_DB_PASSWORD:}
     driver-class-name: ${AIFANYI_DB_DRIVER:org.h2.Driver}
+    hikari:
+      maximum-pool-size: ${DB_MAX_POOL_SIZE:60}
+      minimum-idle: ${DB_MIN_IDLE:10}
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:30000}
+      validation-timeout: 5000
   sql:
     init:
       # schema.sql 全程 IF NOT EXISTS,幂等,每次启动都执行(首启建库,升级加表)
@@ -41,6 +52,10 @@ mybatis-plus:
 
 # ---- 应用自定义配置 ----
 aifanyi:
+  api:
+    # Every normalized HTTP method + route gets an independent fair 50-request gate.
+    max-concurrency-per-route: ${API_MAX_CONCURRENCY_PER_ROUTE:50}
+    acquire-timeout-ms: ${API_ACQUIRE_TIMEOUT_MS:30000}
   jwt:
     # start.bat 每台机器首启生成随机 secret 存 data/jwt.secret 并注入;此处仅兜底
     secret: ${AIFANYI_JWT_SECRET:dev-only-secret-change-me-please-32bytes-minimum-0123456789}
@@ -61,10 +76,13 @@ aifanyi:
       base-url: ${AI_SERVICE_URL:http://localhost:8001}
   # 密钥/Base URL/模型一律存在每用户 user_setting（设置页），不再从环境变量读取
   llm:
-    # 推理模型关思维链提速；批大小越大请求数越少；并发越高墙钟越快
+    # 推理模型关思维链提速；批大小越大请求数越少
     disable-thinking: ${LLM_DISABLE_THINKING:true}
     batch-size: ${LLM_BATCH_SIZE:40}
+    # 用户没在「设置 → 模型服务」给某条服务单独配并发时的默认值
     concurrency: ${LLM_CONCURRENCY:8}
+    # 全局在途请求上限（所有任务共用），多任务并跑时的兜底
+    max-total-concurrency: ${LLM_MAX_TOTAL_CONCURRENCY:48}
   tts:
     # 配音逐行合成并发数（提速关键：300 行字幕串行要 10~30 分钟，6 路并发降到 2~5 分钟）
     concurrency: ${TTS_CONCURRENCY:6}
@@ -78,8 +96,8 @@ aifanyi:
     max-search-per-agent: ${AGENT_MAX_SEARCH:2}
     max-tools-per-agent: ${AGENT_MAX_TOOLS:3}
     digest-chars: ${AGENT_DIGEST_CHARS:6000}
-    # ⑧ 滚动窗口：组内串行保上下文连续，组间并发保速度（1=全串行，质量最高最慢）
-    translate-group-size: ${AGENT_TRANSLATE_GROUP:5}
+    # ⑧ 滚动窗口上下文档位：source=只带前文原文（可全并发，默认）/ full=带原文+译文（最连贯，组内串行）
+    context-mode: ${AGENT_CONTEXT_MODE:source}
     context-overlap: ${AGENT_CONTEXT_OVERLAP:4}
     qdrant-url: ${QDRANT_URL:http://localhost:6333}
     qdrant-collection: ${QDRANT_COLLECTION:aifanyi_terms}

@@ -50,6 +50,17 @@ public class MediaTranscribeService {
      */
     public List<Segment> transcribe(TranslationTask task, Runnable onAudioDone, DoubleConsumer asrProgress) {
         Long taskId = task.getId();
+        // ── 快路：用户自带原文字幕 → 直接拿它的时间轴与文本，整段 ASR 全部跳过 ──
+        // 语音识别是全流程最贵的一段（实测 16.8 分钟视频里 126s / 140s，占九成），
+        // 用户手上已经有字幕时没有任何理由再听一遍。
+        List<Segment> supplied = loadSuppliedSubtitle(task);
+        if (supplied != null) {
+            if (asrProgress != null) {
+                asrProgress.accept(1.0);
+            }
+            log.info("任务 {} 使用自带字幕 {} 条，跳过抽音频与语音识别", taskId, supplied.size());
+            return supplied;
+        }
         // 1. 抽音频
         Path video = Path.of(task.getVideoPath());
         Path audio = storage.resolve(taskId, "audio.mp3");
@@ -126,6 +137,41 @@ public class MediaTranscribeService {
                 rawCount - fixed.size(),
                 rawCount == 0 ? 0 : Math.round((rawCount - fixed.size()) * 1000.0 / rawCount) / 10.0);
         return fixed;
+    }
+
+    // ---- 自带字幕直翻 ----
+
+    /**
+     * 读取任务携带的原文字幕并解析成分段；没带字幕返回 null（走正常转写链路）。
+     *
+     * <p>刻意<b>不做</b>反幻觉、VAD 对轴、缺口补翻那一套：那些是给机器识别结果纠错用的，
+     * 用户自己的字幕是人工产物，轴和内容都该原样尊重，系统去"修"只会帮倒忙。
+     * 只做一层最基础的收尾（{@link SubtitleTimingFixer#fix}）——去空白、去重叠、保证最短时长，
+     * 这几项对任何来源的字幕都成立。
+     *
+     * <p>字幕文件损坏/解析不出内容时直接抛错，而不是悄悄退回去跑 ASR：
+     * 用户明确带了字幕，静默换一条路会让他等两分钟还不知道为什么结果不对。
+     */
+    private List<Segment> loadSuppliedSubtitle(TranslationTask task) {
+        String path = task.getSubtitleSourcePath();
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        Path f = Path.of(path);
+        if (!java.nio.file.Files.exists(f)) {
+            throw new BizException("自带字幕文件已丢失，请重新上传或改用语音识别");
+        }
+        String content;
+        try {
+            content = com.aifanyi.media.CharsetSniffer.decode(java.nio.file.Files.readAllBytes(f));
+        } catch (Exception e) {
+            throw new BizException("读取自带字幕失败: " + e.getMessage());
+        }
+        List<Segment> segs = com.aifanyi.media.SubtitleParser.parse(content);
+        if (segs.isEmpty()) {
+            throw new BizException("自带字幕里没解析出任何一条内容，请确认是有效的 SRT/VTT 文件");
+        }
+        return SubtitleTimingFixer.fix(segs);
     }
 
     // ---- 缺口补翻参数（经验值，见 SpeechGapFinder 注释）----

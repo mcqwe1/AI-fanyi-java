@@ -8,6 +8,7 @@ aifanyi AI 微服务（FastAPI）
 
 阶段3：Gemini 原生视频理解（知识库模式）。
 """
+import base64
 import math
 import os
 import threading
@@ -426,6 +427,94 @@ def embed(req: EmbedRequest):
         raise HTTPException(status_code=500, detail=f"向量化失败: {e}")
 
 
+# ---------------- OCR（划词翻译扩展的「图片翻译」用） ----------------
+
+_ocr = None
+_ocr_lock = threading.Lock()
+
+
+def _load_ocr():
+    """RapidOCR 单例（PP-OCRv4，ONNX/CPU，模型文件随 wheel 内置、完全离线）。
+
+    与 embedding 同一个理由不上 GPU：单张图几百毫秒，犯不着去抢转写的显存。
+    内置检测+识别模型支持中英文；首次加载约 2~3 秒，之后常驻。
+    """
+    global _ocr
+    if _ocr is not None:
+        return _ocr
+    with _ocr_lock:
+        if _ocr is not None:
+            return _ocr
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except ImportError:
+            raise HTTPException(status_code=500, detail=(
+                "rapidocr 未安装：完整包已内置；"
+                "自装环境在 ai-service 目录执行 "
+                ".venv\\Scripts\\pip install rapidocr-onnxruntime"))
+        t0 = time.time()
+        eng = RapidOCR()
+        print(f"[ai-service] OCR 引擎已加载（RapidOCR/PP-OCRv4, ONNX/CPU, {time.time() - t0:.1f}s）")
+        _ocr = eng
+        return _ocr
+
+
+class OcrRequest(BaseModel):
+    image_base64: str                   # 纯 base64，不带 data: 前缀
+
+
+class OcrLine(BaseModel):
+    text: str
+    score: float
+    # [x, y, w, h] 轴对齐包围盒（原图像素坐标），供扩展把译文绘回原位。
+    # 旋转文字取外接矩形；异常时为 None，调用方必须容忍缺失。
+    box: Optional[List[float]] = None
+
+
+class OcrResponse(BaseModel):
+    lines: List[OcrLine]
+    elapsed_ms: int
+    engine: str
+
+
+@app.post("/ocr", response_model=OcrResponse)
+def ocr(req: OcrRequest):
+    """图片 OCR：返回按版面顺序的文字行。识别不到文字返回空 lines（不算错误）。
+
+    只做识别不做翻译——翻译由后端拿行文本走用户配置的 LLM 文本链路，
+    这样任何纯文本模型（DeepSeek 等）都能用图片翻译，不要求视觉模型。
+    """
+    raw = (req.image_base64 or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="image_base64 不能为空")
+    try:
+        data = base64.b64decode(raw, validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="image_base64 不是合法的 base64")
+    if len(data) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="图片过大（上限 8MB）")
+    engine = _load_ocr()
+    t0 = time.time()
+    try:
+        result, _ = engine(data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OCR 识别失败: {e}")
+    lines = []
+    for _box, t, s in (result or []):
+        if not (t and t.strip()):
+            continue
+        bbox = None
+        try:
+            xs = [float(p[0]) for p in _box]
+            ys = [float(p[1]) for p in _box]
+            bbox = [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)]
+        except Exception:
+            bbox = None  # 坐标解析失败不影响文字返回
+        lines.append(OcrLine(text=t, score=float(s), box=bbox))
+    return OcrResponse(lines=lines, elapsed_ms=int((time.time() - t0) * 1000),
+                       engine="rapidocr-ppocrv4")
+
+
 class TranscribeRequest(BaseModel):
     audio_path: str
     language: Optional[str] = None      # 源语言（如 "en"），None/"auto" 自动检测
@@ -602,3 +691,175 @@ def transcribe(req: TranscribeRequest):
         compute_type=_resolved.get("compute_type", ""),
         segments=out,
     )
+
+
+# ---------------------------------------------------------------------------
+# PDF 版式保持翻译（BabelDOC，子进程隔离）
+# ---------------------------------------------------------------------------
+# 后端（Java）同机调用：POST /pdf/translate 传源文件路径与 OpenAI 兼容配置，
+# 返回 job_id；随后轮询 GET /pdf/job/{job_id} 拿进度与产物路径。
+# babeldoc 在独立子进程里跑（原因见 app/pdf_runner.py 头注释），
+# 本进程只负责起进程、逐行读 stdout JSON 事件、维护任务注册表。
+
+import subprocess
+import tempfile
+import uuid
+import json
+import sys
+
+
+class PdfTranslateReq(BaseModel):
+    source_path: str            # 源 PDF 绝对路径（同机共享文件系统）
+    out_dir: str                # 产物输出目录（由调用方创建）
+    base_url: str               # OpenAI 兼容接口
+    api_key: str
+    model: str
+    lang_in: str = "en"
+    lang_out: str = "zh"
+    qps: int = 4
+    no_dual: bool = True        # 暂只要纯译文版（对照页已有并排 iframe）
+
+
+class PdfJobStatus(BaseModel):
+    status: str                 # RUNNING | SUCCESS | FAILED
+    stage: str = ""
+    progress: float = 0.0
+    mono_path: Optional[str] = None
+    dual_path: Optional[str] = None
+    error: Optional[str] = None
+
+
+_pdf_jobs = {}                  # job_id -> dict（状态由读线程单写，轮询只读，无需锁）
+_PDF_JOB_KEEP = 50              # 已结束任务的保留条数（dict 保序，超出就丢最老的）
+_PDF_RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pdf_runner.py")
+
+
+def _pdf_watch(job_id: str, proc: subprocess.Popen):
+    """读子进程 stdout 的 JSON 事件行，更新任务状态。babeldoc 日志走 stderr 不经此处。
+
+    收到 finish/error 就收尾并杀掉子进程，不等它自己退出：babeldoc 内部的工作线程池
+    不关闭，进程可能在产物已落盘后继续常驻（实测），干等会让任务永远卡在 RUNNING。
+    """
+    job = _pdf_jobs[job_id]
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue                        # 第三方库偶发往 stdout 打的杂线，忽略
+            kind = ev.get("event")
+            if kind == "progress":
+                job["stage"] = ev.get("stage", "")
+                job["progress"] = float(ev.get("overall", 0.0))
+            elif kind == "finish":
+                job["mono_path"] = ev.get("mono")
+                job["dual_path"] = ev.get("dual")
+                break
+            elif kind == "error":
+                job["error"] = ev.get("message", "未知错误")
+                break
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        code = proc.poll()
+        if job.get("error"):
+            job["status"] = "FAILED"
+        elif not job.get("mono_path"):
+            # 没收到任何终结事件、stdout 就断了 —— 子进程多半是崩了
+            job["status"] = "FAILED"
+            job["error"] = (
+                f"babeldoc 子进程异常退出（code={code}），详见输出目录 babeldoc.log"
+                if code not in (0, None)
+                else "babeldoc 未产出译文 PDF（可能是扫描版或加密文档）"
+            )
+        else:
+            job["status"] = "SUCCESS"
+            job["progress"] = 100.0
+    except Exception as e:
+        job["status"] = "FAILED"
+        job["error"] = f"读取子进程输出失败: {e}"
+    finally:
+        # 句柄在这里关，不能等轮询接口——调用方可能拿到终态后就再也不来了
+        fh = job.pop("stderr_fh", None)
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
+        job.pop("proc", None)
+        cfg_path = job.pop("cfg_path", None)
+        if cfg_path:
+            try:
+                os.remove(cfg_path)
+            except OSError:
+                pass
+        _prune_pdf_jobs()
+
+
+def _prune_pdf_jobs():
+    """只保留最近若干条已结束的任务：ai-service 是常驻进程，任务表不清会一直涨。
+    调用方（后端）拿到终态就不再轮询，留几十条足够覆盖「刚完成还没被读走」的窗口。"""
+    done = [k for k, v in _pdf_jobs.items() if v.get("status") != "RUNNING"]
+    for k in done[:-_PDF_JOB_KEEP]:                 # dict 保序，切片天然丢最老的
+        _pdf_jobs.pop(k, None)
+
+
+@app.post("/pdf/translate")
+def pdf_translate(req: PdfTranslateReq):
+    if not os.path.isfile(req.source_path):
+        raise HTTPException(status_code=400, detail=f"源文件不存在: {req.source_path}")
+    try:
+        import babeldoc  # noqa: F401
+    except ImportError:
+        raise HTTPException(status_code=501, detail="babeldoc 未安装（精简包不含 PDF 版式翻译组件）")
+
+    job_id = uuid.uuid4().hex
+    cfg_path = os.path.join(tempfile.gettempdir(), f"babeldoc-{job_id}.json")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(req.model_dump(), f, ensure_ascii=False)
+
+    # stderr 落到输出目录，排查排版问题时能看到 babeldoc 完整日志
+    stderr_log = open(os.path.join(req.out_dir, "babeldoc.log"), "w", encoding="utf-8")
+    proc = subprocess.Popen(
+        [sys.executable, _PDF_RUNNER, cfg_path],
+        stdout=subprocess.PIPE, stderr=stderr_log,
+        encoding="utf-8", errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    _pdf_jobs[job_id] = {"status": "RUNNING", "stage": "启动中", "progress": 0.0,
+                         "proc": proc, "stderr_fh": stderr_log, "cfg_path": cfg_path}
+    threading.Thread(target=_pdf_watch, args=(job_id, proc), daemon=True).start()
+    return {"job_id": job_id}
+
+
+@app.get("/pdf/job/{job_id}", response_model=PdfJobStatus)
+def pdf_job(job_id: str):
+    job = _pdf_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return PdfJobStatus(status=job["status"], stage=job.get("stage", ""),
+                        progress=job.get("progress", 0.0),
+                        mono_path=job.get("mono_path"), dual_path=job.get("dual_path"),
+                        error=job.get("error"))
+
+
+@app.delete("/pdf/job/{job_id}")
+def pdf_cancel(job_id: str):
+    """取消任务（用户删除了文档翻译任务）：直接杀子进程，读线程随后收尾。"""
+    job = _pdf_jobs.get(job_id)
+    if job is None:
+        return {"ok": True}
+    proc = job.get("proc")
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    job["status"] = "FAILED"
+    job["error"] = job.get("error") or "任务已取消"
+    return {"ok": True}

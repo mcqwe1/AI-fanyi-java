@@ -3,18 +3,28 @@ package com.aifanyi.service;
 import com.aifanyi.common.BizException;
 import com.aifanyi.agent.search.SearchConfig;
 import com.aifanyi.agent.search.SearchEngines;
+import com.aifanyi.asr.AiServiceLauncher;
+import com.aifanyi.asr.AsrSpeed;
 import com.aifanyi.config.AifanyiProperties;
+import com.aifanyi.controller.dto.SettingsDtos.AsrEngineVO;
+import com.aifanyi.controller.dto.SettingsDtos.LlmProviderVO;
+import com.aifanyi.controller.dto.SettingsDtos.ModelServiceVO;
+import com.aifanyi.controller.dto.SettingsDtos.SaveModelServiceReq;
 import com.aifanyi.controller.dto.SettingsDtos.SearchEngineVO;
 import com.aifanyi.controller.dto.SettingsDtos.SecretView;
 import com.aifanyi.controller.dto.SettingsDtos.SettingsVO;
 import com.aifanyi.controller.dto.SettingsDtos.TtsEngineVO;
 import com.aifanyi.controller.dto.SettingsDtos.UpdateSettingsReq;
+import com.aifanyi.entity.ModelService;
 import com.aifanyi.entity.UserSetting;
-import com.aifanyi.llm.GeminiConfig;
 import com.aifanyi.llm.LlmConfig;
+import com.aifanyi.llm.LlmProviders;
+import com.aifanyi.llm.LlmTranslator;
 import com.aifanyi.tts.TtsConfig;
 import com.aifanyi.tts.TtsEngines;
+import com.aifanyi.mapper.ModelServiceMapper;
 import com.aifanyi.mapper.UserSettingMapper;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -26,6 +36,7 @@ import org.springframework.web.client.RestClient;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -39,8 +50,11 @@ import java.util.List;
 public class SettingsService {
 
     private final UserSettingMapper mapper;
+    private final ModelServiceMapper serviceMapper;
     private final AifanyiProperties props;
     private final ObjectMapper json;
+    /** 只用来问「本地转写实际跑在 GPU 还是 CPU」，好把耗时预估算准 */
+    private final AiServiceLauncher aiLauncher;
 
     private UserSetting load(Long userId) {
         return mapper.selectById(userId);
@@ -56,18 +70,15 @@ public class SettingsService {
                 s == null ? null : s.getLlmModel(),
                 secret(s == null ? null : s.getDashscopeApiKey()),
                 secret(s == null ? null : s.getZhipuApiKey()),
-                s == null ? null : s.getGeminiBaseUrl(),
-                secret(s == null ? null : s.getGeminiApiKey()),
-                s == null ? null : s.getGeminiModel(),
                 s == null ? null : s.getTtsProvider(),
                 s == null ? null : s.getTtsBaseUrl(),
                 secret(s == null ? null : s.getTtsApiKey()),
                 s == null ? null : s.getTtsModel(),
                 s == null ? null : s.getStylePrompt(),
-                s == null ? null : s.getTermExtractPrompt(),
-                // 内置模板原样展示（含 {sourceLang}/{targetLang} 占位符），用户可复制为自定义起点
-                com.aifanyi.llm.GeminiClient.defaultTermPrompt(),
                 // ---- Agent 模式 ----
+                s == null ? null : s.getAgentTranslateBaseUrl(),
+                secret(s == null ? null : s.getAgentTranslateApiKey()),
+                s == null ? null : s.getAgentTranslateModel(),
                 s == null ? null : s.getAgentMainBaseUrl(),
                 secret(s == null ? null : s.getAgentMainApiKey()),
                 s == null ? null : s.getAgentMainModel(),
@@ -96,14 +107,14 @@ public class SettingsService {
         if (has(req.llmModel())) s.setLlmModel(req.llmModel().trim());
         if (has(req.dashscopeApiKey())) s.setDashscopeApiKey(req.dashscopeApiKey().trim());
         if (has(req.zhipuApiKey())) s.setZhipuApiKey(req.zhipuApiKey().trim());
-        if (has(req.geminiBaseUrl())) s.setGeminiBaseUrl(req.geminiBaseUrl().trim());
-        if (has(req.geminiApiKey())) s.setGeminiApiKey(req.geminiApiKey().trim());
-        if (has(req.geminiModel())) s.setGeminiModel(req.geminiModel().trim());
         if (has(req.ttsProvider())) s.setTtsProvider(req.ttsProvider().trim());
         if (has(req.ttsBaseUrl())) s.setTtsBaseUrl(req.ttsBaseUrl().trim());
         if (has(req.ttsApiKey())) s.setTtsApiKey(req.ttsApiKey().trim());
         if (has(req.ttsModel())) s.setTtsModel(req.ttsModel().trim());
-        // ---- Agent 模式：主/子 Agent 两组 + 搜索引擎 ----
+        // ---- Agent 模式：翻译模型 + 主/子 Agent 两组 + 搜索引擎 ----
+        if (has(req.agentTranslateBaseUrl())) s.setAgentTranslateBaseUrl(req.agentTranslateBaseUrl().trim());
+        if (has(req.agentTranslateApiKey())) s.setAgentTranslateApiKey(req.agentTranslateApiKey().trim());
+        if (has(req.agentTranslateModel())) s.setAgentTranslateModel(req.agentTranslateModel().trim());
         if (has(req.agentMainBaseUrl())) s.setAgentMainBaseUrl(req.agentMainBaseUrl().trim());
         if (has(req.agentMainApiKey())) s.setAgentMainApiKey(req.agentMainApiKey().trim());
         if (has(req.agentMainModel())) s.setAgentMainModel(req.agentMainModel().trim());
@@ -122,11 +133,6 @@ public class SettingsService {
             String norm = TaskService.normalizeStylePrompt(req.stylePrompt());
             s.setStylePrompt(norm == null ? "" : norm);
         }
-        if (req.termExtractPrompt() != null) {
-            // 同理：空串=清空（回退内置提示词）；非空=启用自定义
-            String t = req.termExtractPrompt().trim();
-            s.setTermExtractPrompt(t);
-        }
         if (isNew) {
             mapper.insert(s);
         } else {
@@ -134,40 +140,77 @@ public class SettingsService {
         }
     }
 
-    /** 用户自定义的术语抽取提示词（空=未启用，走内置）。 */
-    public String effectiveTermPrompt(Long userId) {
-        UserSetting s = load(userId);
-        String p = s == null ? null : s.getTermExtractPrompt();
-        return has(p) ? p : null;
-    }
-
     // ---- 有效配置解析（供 pipeline / providers 用；不完整即抛错指引设置页）----
 
+    /**
+     * 全局翻译使用的大语言模型配置。
+     * 优先取「已配置的模型服务」里默认且启用的那行（多服务商，协议感知）；
+     * 没有任何服务行时回落到 user_setting 的旧 llm_* 单配置（老用户无感兼容）。
+     */
     public LlmConfig effectiveLlm(Long userId) {
+        ModelService svc = activeLlmService(userId);
+        if (svc != null) {
+            return toConfig(svc);
+        }
         UserSetting s = load(userId);
         String base = s == null ? null : s.getLlmBaseUrl();
         String key = s == null ? null : s.getLlmApiKey();
         String model = s == null ? null : s.getLlmModel();
         if (!has(base) || !has(key) || !has(model)) {
-            throw new BizException("翻译模型未配置完整，请在「设置 → API 密钥」填写 Base URL、API Key 和模型");
+            throw new BizException("翻译模型未配置，请在「设置 → API 配置 → 大语言模型」添加模型服务");
         }
         AifanyiProperties.Llm tune = props.getLlm();
         return new LlmConfig(base.trim(), key.trim(), model.trim(),
                 tune.isDisableThinking(), tune.getBatchSize(), tune.getConcurrency());
     }
 
-    public GeminiConfig effectiveGemini(Long userId) {
-        UserSetting s = load(userId);
-        String base = s == null ? null : s.getGeminiBaseUrl();
-        String key = s == null ? null : s.getGeminiApiKey();
-        String model = s == null ? null : s.getGeminiModel();
-        if (!has(base) || !has(key) || !has(model)) {
-            throw new BizException("Gemini 未配置完整，请在「设置 → API 密钥」填写 Base URL、API Key 和模型");
+    /** 当前生效的服务行：默认且启用 > 任一启用（默认被停用时不让翻译直接瘫掉）。 */
+    private ModelService activeLlmService(Long userId) {
+        List<ModelService> rows = serviceMapper.selectList(Wrappers.<ModelService>lambdaQuery()
+                .eq(ModelService::getUserId, userId)
+                .eq(ModelService::getCategory, "llm")
+                .eq(ModelService::getEnabled, 1));
+        if (rows.isEmpty()) {
+            return null;
         }
-        return new GeminiConfig(base.trim(), key.trim(), model.trim());
+        return rows.stream()
+                .max(Comparator.comparing((ModelService m) -> m.getIsDefault() != null && m.getIsDefault() == 1)
+                        .thenComparing(m -> m.getUpdatedAt() == null ? java.time.LocalDateTime.MIN : m.getUpdatedAt()))
+                .orElse(null);
+    }
+
+    private LlmConfig toConfig(ModelService svc) {
+        AifanyiProperties.Llm tune = props.getLlm();
+        return new LlmConfig(
+                svc.getBaseUrl() == null ? "" : svc.getBaseUrl().trim(),
+                svc.getApiKey() == null ? "" : svc.getApiKey().trim(),
+                svc.getModel() == null ? "" : svc.getModel().trim(),
+                has(svc.getProtocol()) ? svc.getProtocol() : LlmConfig.PROTO_OPENAI,
+                svc.getTimeoutSec() == null ? 60 : svc.getTimeoutSec(),
+                tune.isDisableThinking(), tune.getBatchSize(),
+                // 该服务单独配了并发就用它，否则跟随全局默认
+                svc.getConcurrency() == null || svc.getConcurrency() <= 0
+                        ? tune.getConcurrency() : svc.getConcurrency());
     }
 
     // ---- Agent 模式（实验功能）----
+
+    /**
+     * 全能AI翻译的「翻译模型」：负责最终逐行翻译。
+     * 未单独配置时回落到默认大语言模型服务——与主/子 Agent 同一回退哲学。
+     */
+    public LlmConfig effectiveAgentTranslate(Long userId) {
+        UserSetting s = load(userId);
+        String base = s == null ? null : s.getAgentTranslateBaseUrl();
+        String key = s == null ? null : s.getAgentTranslateApiKey();
+        String model = s == null ? null : s.getAgentTranslateModel();
+        if (!has(base) || !has(key) || !has(model)) {
+            return effectiveLlm(userId);
+        }
+        AifanyiProperties.Llm tune = props.getLlm();
+        return new LlmConfig(base.trim(), key.trim(), model.trim(),
+                tune.isDisableThinking(), tune.getBatchSize(), tune.getConcurrency());
+    }
 
     /**
      * 主 Agent（场景推测/仲裁）模型配置。未单独配置时回落到翻译 LLM——
@@ -256,7 +299,7 @@ public class SettingsService {
         UserSetting s = load(userId);
         TtsEngines.Engine e = TtsEngines.byId(s == null ? null : s.getTtsProvider());
         if (e == null) {
-            throw new BizException("请先在「设置 → API 密钥 → 语音合成 TTS」选择配音引擎");
+            throw new BizException("请先在「设置 → API 配置 → 语音合成（TTS）」选择配音引擎");
         }
         switch (e.id()) {
             case "edge":
@@ -264,7 +307,7 @@ public class SettingsService {
             case "siliconflow": {
                 String key = s.getTtsApiKey();
                 if (!has(key)) {
-                    throw new BizException("硅基流动未配置 API Key，请在「设置 → API 密钥 → 语音合成 TTS」填写");
+                    throw new BizException("硅基流动未配置 API Key，请在「设置 → API 配置 → 语音合成（TTS）」填写");
                 }
                 return new TtsConfig(e.defaultBaseUrl(), key.trim(), e.defaultModel());
             }
@@ -273,7 +316,7 @@ public class SettingsService {
                 String key = s.getTtsApiKey();
                 String model = s.getTtsModel();
                 if (!has(base) || !has(key) || !has(model)) {
-                    throw new BizException("TTS 未配置完整，请在「设置 → API 密钥 → 语音合成 TTS」填写 Base URL、API Key 和模型");
+                    throw new BizException("TTS 未配置完整，请在「设置 → API 配置 → 语音合成（TTS）」填写 Base URL、API Key 和模型");
                 }
                 return new TtsConfig(base.trim(), key.trim(), model.trim());
             }
@@ -302,42 +345,6 @@ public class SettingsService {
         return out;
     }
 
-    /** KB 翻译并发上限：与 GeminiClient.MAX_PARALLEL 同量级，避免压垮个人代理/触发 Vertex 配额。 */
-    private static final int KB_MAX_CONCURRENCY = 6;
-
-    /**
-     * 按任务模式解析翻译配置：KB 模式与抽术语同用 Gemini（保证术语表遵循一致），
-     * 普通模式用「设置 → API 密钥」里的 LLM 配置。模式路由收在这里，新增翻译入口不必各自记得分流。
-     */
-    public LlmConfig effectiveTranslationLlm(Long userId, boolean kbMode) {
-        return kbMode ? effectiveKbLlm(userId) : effectiveLlm(userId);
-    }
-
-    /**
-     * KB（术语表）模式的翻译配置：与抽术语用同一 Gemini 端点/模型，保证术语表遵循的一致性
-     * （DeepSeek 等第三方模型偶尔不按 Gemini 建的术语表翻译）。
-     * 模型后缀改写（vertex2openai 代理约定）：
-     *  - 剥掉 -search——联网 grounding 只对抽术语有价值，批量翻译带上只会又慢又贵；
-     *  - 追加 -nothinking——把 Gemini 思考预算压到 0（pro 系代理自动用最低 128）。
-     *    实测 gemini-3-flash 同批字幕：默认思考 ~15s/批（多烧 ~1300 思考 token），关思考 ~3s/批。
-     * disableThinking 固定 false（有意为之）：thinking:{type:disabled} 是 DeepSeek 系方言字段，
-     * Gemini 代理不认识；关思考走上面的 -nothinking 模型名约定。
-     * 并发压到 KB_MAX_CONCURRENCY——429 会被 OpenAiTranslator 静默回退为原文，宁可慢一点。
-     */
-    private LlmConfig effectiveKbLlm(Long userId) {
-        GeminiConfig g = effectiveGemini(userId);
-        String model = g.model();
-        if (model.endsWith("-search")) {
-            model = model.substring(0, model.length() - "-search".length());
-        }
-        if (!model.endsWith("-nothinking")) {
-            model = model + "-nothinking";
-        }
-        AifanyiProperties.Llm tune = props.getLlm();
-        return new LlmConfig(g.baseUrl(), g.apiKey(), model,
-                false, tune.getBatchSize(), Math.min(tune.getConcurrency(), KB_MAX_CONCURRENCY));
-    }
-
     public String effectiveGroqKey(Long userId) {
         UserSetting s = load(userId);
         return s == null ? null : s.getGroqApiKey();
@@ -353,25 +360,293 @@ public class SettingsService {
         return s == null ? null : s.getZhipuApiKey();
     }
 
-    // ---- 拉取模型列表（与流水线解析解耦：只需 base+key，不要求已选模型）----
+    // ---- 已配置的模型服务（「设置 → API 配置 → 大语言模型」多服务商管理）----
 
-    /**
-     * 拉取 OpenAI 兼容端点的可用模型列表（GET {baseUrl}/models）。
-     * baseUrl/apiKey 传空则回退到已保存的 LLM 配置。
-     */
-    public List<String> listLlmModels(Long userId, String baseUrl, String apiKey) {
-        UserSetting s = load(userId);
-        String base = has(baseUrl) ? baseUrl.trim() : (s == null ? null : s.getLlmBaseUrl());
-        String key = has(apiKey) ? apiKey.trim() : (s == null ? null : s.getLlmApiKey());
-        return fetchModels(base, key);
+    /** 服务商注册表（下拉选项）。 */
+    public List<LlmProviderVO> listLlmProviders() {
+        List<LlmProviderVO> out = new ArrayList<>();
+        for (LlmProviders.Provider p : LlmProviders.all()) {
+            out.add(new LlmProviderVO(p.id(), p.name(), p.protocol(), p.defaultBaseUrl(),
+                    p.defaultModel(), p.keyHint(), p.docsUrl(), p.note(),
+                    p.needModel(), p.canListModels(), p.modelLabel(), p.custom()));
+        }
+        return out;
     }
 
-    /** 同上，回退到已保存的 Gemini 配置（代理或官方 OpenAI 兼容端点均可）。 */
-    public List<String> listGeminiModels(Long userId, String baseUrl, String apiKey) {
+    /**
+     * 服务列表。首次访问时若用户还有旧的 llm_* 单配置而无任何服务行，
+     * 自动迁移成一行默认服务——老用户打开新设置页就能看到并继续用原配置。
+     */
+    public List<ModelServiceVO> listLlmServices(Long userId) {
+        List<ModelService> rows = llmRows(userId);
+        if (rows.isEmpty()) {
+            UserSetting s = load(userId);
+            if (s != null && has(s.getLlmBaseUrl()) && has(s.getLlmApiKey()) && has(s.getLlmModel())) {
+                ModelService m = new ModelService();
+                m.setUserId(userId);
+                m.setCategory("llm");
+                m.setProvider(guessProvider(s.getLlmBaseUrl()));
+                m.setProtocol(LlmConfig.PROTO_OPENAI);
+                m.setBaseUrl(s.getLlmBaseUrl().trim());
+                m.setApiKey(s.getLlmApiKey().trim());
+                m.setModel(s.getLlmModel().trim());
+                m.setTimeoutSec(60);
+                m.setEnabled(1);
+                m.setIsDefault(1);
+                serviceMapper.insert(m);
+                log.info("用户 {} 的旧翻译模型配置已迁移为模型服务 #{}", userId, m.getId());
+                rows = llmRows(userId);
+            }
+        }
+        return rows.stream().map(SettingsService::toVO).toList();
+    }
+
+    /** 旧配置迁移时按 Base URL 猜服务商，猜不出就归自定义。 */
+    private static String guessProvider(String baseUrl) {
+        String u = baseUrl == null ? "" : baseUrl.toLowerCase();
+        if (u.contains("deepseek")) return "deepseek";
+        if (u.contains("dashscope") || u.contains("aliyun")) return "qwen";
+        if (u.contains("googleapis")) return "gemini";
+        if (u.contains("api.openai.com")) return "gpt";
+        if (u.contains("bigmodel")) return "glm";
+        if (u.contains("anthropic")) return "claude";
+        if (u.contains("api.x.ai")) return "grok";
+        return "custom-openai";
+    }
+
+    private List<ModelService> llmRows(Long userId) {
+        return serviceMapper.selectList(Wrappers.<ModelService>lambdaQuery()
+                .eq(ModelService::getUserId, userId)
+                .eq(ModelService::getCategory, "llm")
+                .orderByDesc(ModelService::getIsDefault)
+                .orderByDesc(ModelService::getUpdatedAt));
+    }
+
+    private static ModelServiceVO toVO(ModelService m) {
+        return new ModelServiceVO(m.getId(), m.getProvider(), LlmProviders.displayName(m.getProvider()),
+                m.getProtocol(), m.getBaseUrl(), secret(m.getApiKey()), m.getModel(),
+                m.getTimeoutSec() == null ? 60 : m.getTimeoutSec(),
+                m.getConcurrency() == null ? 0 : m.getConcurrency(),
+                m.getEnabled() != null && m.getEnabled() == 1,
+                m.getIsDefault() != null && m.getIsDefault() == 1,
+                m.getUpdatedAt());
+    }
+
+    /**
+     * 新增/更新服务。返回保存后的行。
+     * Base URL 规则：openai/claude 协议缺版本段自动补 /v1（normalizedBaseUrl 回传给前端提示用户）。
+     * 更新时 API Key 留空 = 保留原 Key。
+     */
+    public ModelServiceVO saveLlmService(Long userId, SaveModelServiceReq req) {
+        LlmProviders.Provider p = LlmProviders.byId(req.provider());
+        if (p == null) {
+            throw new BizException("未知服务商: " + req.provider());
+        }
+        String base = has(req.baseUrl()) ? req.baseUrl().trim() : p.defaultBaseUrl();
+        if (!has(base)) {
+            throw new BizException("请填写 Base URL");
+        }
+        base = normalizeBaseUrl(base, p.protocol());
+        if (p.needModel() && "模型".equals(p.modelLabel()) && !has(req.model())) {
+            throw new BizException("请选择或填写模型名");
+        }
+
+        ModelService m;
+        boolean isNew = req.id() == null;
+        if (isNew) {
+            if (!has(req.apiKey())) {
+                throw new BizException("请填写 API Key");
+            }
+            m = new ModelService();
+            m.setUserId(userId);
+            m.setCategory("llm");
+        } else {
+            m = ownedService(userId, req.id());
+        }
+        m.setProvider(p.id());
+        m.setProtocol(p.protocol());
+        m.setBaseUrl(base);
+        if (has(req.apiKey())) {
+            m.setApiKey(req.apiKey().trim());
+        }
+        m.setModel(req.model() == null ? null : req.model().trim());
+        int timeout = req.timeoutSec() == null ? 60 : req.timeoutSec();
+        m.setTimeoutSec(Math.max(5, Math.min(600, timeout)));
+        // 并发：0 = 跟随全局默认；上限 32（再高对同一端点基本只换来限流）。
+        // 「跟随默认」必须存 0 而不是 null——MyBatis-Plus 的 updateById 默认跳过 null 字段，
+        // 存 null 等于什么也没改，用户把 16 调回默认时会发现根本调不回去。
+        m.setConcurrency(req.concurrency() == null || req.concurrency() <= 0
+                ? 0 : Math.min(32, req.concurrency()));
+        if (m.getEnabled() == null) {
+            m.setEnabled(1);
+        }
+
+        boolean firstService = llmRows(userId).isEmpty();
+        if (isNew) {
+            m.setIsDefault(0);
+            serviceMapper.insert(m);
+        } else {
+            serviceMapper.updateById(m);
+        }
+        // 第一条服务自动设为默认；或调用方显式要求设默认
+        if (firstService || Boolean.TRUE.equals(req.makeDefault())) {
+            setDefaultLlmService(userId, m.getId());
+            m.setIsDefault(1);
+        }
+        return toVO(serviceMapper.selectById(m.getId()));
+    }
+
+    /** openai/claude 协议：Base URL 无版本段时自动补 /v1（如 api.deepseek.com → api.deepseek.com/v1）。 */
+    public static String normalizeBaseUrl(String url, String protocol) {
+        String u = url == null ? "" : url.trim().replaceAll("/+$", "");
+        if (!LlmConfig.PROTO_OPENAI.equals(protocol) && !LlmConfig.PROTO_CLAUDE.equals(protocol)) {
+            return u;
+        }
+        // 路径里已有 /v1、/v4、/v1beta 等版本段就不动（智谱 /v4、Gemini /v1beta/openai）
+        if (u.matches("(?i).*/v\\d+[a-z]*(/.*)?$") || u.matches("(?i).*/v\\d+[a-z]*/.*")) {
+            return u;
+        }
+        return u + "/v1";
+    }
+
+    private ModelService ownedService(Long userId, Long id) {
+        ModelService m = serviceMapper.selectById(id);
+        if (m == null || !m.getUserId().equals(userId)) {
+            throw new BizException(404, "服务不存在");
+        }
+        return m;
+    }
+
+    public void deleteLlmService(Long userId, Long id) {
+        ModelService m = ownedService(userId, id);
+        serviceMapper.deleteById(m.getId());
+        // 删掉的是默认服务 → 把最近更新的启用服务顶上，翻译不断档
+        if (m.getIsDefault() != null && m.getIsDefault() == 1) {
+            llmRows(userId).stream()
+                    .filter(r -> r.getEnabled() != null && r.getEnabled() == 1)
+                    .findFirst()
+                    .ifPresent(r -> setDefaultLlmService(userId, r.getId()));
+        }
+    }
+
+    /** 设为默认（自动启用），并清掉其他行的默认标记。 */
+    public void setDefaultLlmService(Long userId, Long id) {
+        ModelService target = ownedService(userId, id);
+        for (ModelService r : llmRows(userId)) {
+            boolean shouldBeDefault = r.getId().equals(target.getId());
+            int def = shouldBeDefault ? 1 : 0;
+            Integer cur = r.getIsDefault() == null ? 0 : r.getIsDefault();
+            boolean enable = shouldBeDefault && (r.getEnabled() == null || r.getEnabled() != 1);
+            if (cur != def || enable) {
+                r.setIsDefault(def);
+                if (shouldBeDefault) {
+                    r.setEnabled(1);
+                }
+                serviceMapper.updateById(r);
+            }
+        }
+    }
+
+    public void toggleLlmService(Long userId, Long id, boolean enabled) {
+        ModelService m = ownedService(userId, id);
+        m.setEnabled(enabled ? 1 : 0);
+        serviceMapper.updateById(m);
+    }
+
+    /**
+     * 测试连接：按表单/已存服务的配置真实翻译一行 "Hello"。
+     * 不落库——填完还没保存也能测。返回人话结果（含译文与耗时）。
+     */
+    public String testLlmService(Long userId, SaveModelServiceReq req, LlmTranslator translator) {
+        LlmProviders.Provider p = LlmProviders.byId(req.provider());
+        if (p == null) {
+            throw new BizException("未知服务商: " + req.provider());
+        }
+        String base = has(req.baseUrl()) ? req.baseUrl().trim() : p.defaultBaseUrl();
+        if (!has(base)) {
+            throw new BizException("请填写 Base URL");
+        }
+        base = normalizeBaseUrl(base, p.protocol());
+        String key = req.apiKey();
+        String model = req.model();
+        if ((!has(key) || (p.needModel() && !has(model))) && req.id() != null) {
+            // Key/模型留空 → 用已存服务的
+            ModelService saved = ownedService(userId, req.id());
+            if (!has(key)) {
+                key = saved.getApiKey();
+            }
+            if (!has(model)) {
+                model = saved.getModel();
+            }
+        }
+        if (!has(key)) {
+            throw new BizException("请填写 API Key（或先保存服务）");
+        }
+        AifanyiProperties.Llm tune = props.getLlm();
+        int timeout = req.timeoutSec() == null ? 60 : Math.max(5, Math.min(600, req.timeoutSec()));
+        LlmConfig cfg = new LlmConfig(base, key.trim(), model == null ? "" : model.trim(),
+                p.protocol(), timeout, tune.isDisableThinking(), 1, 1);
+        long t0 = System.currentTimeMillis();
+        List<String> out = translator.translate(List.of("Hello, nice to meet you."), "中文", cfg);
+        long ms = System.currentTimeMillis() - t0;
+        String translated = out.isEmpty() ? "" : out.get(0);
+        if (!has(translated) || "Hello, nice to meet you.".equals(translated)) {
+            throw new BizException("连接失败：端点没有返回译文，请检查 Base URL / Key / 模型是否正确（后台日志有详细错误）");
+        }
+        return "连接正常（" + (ms / 1000.0) + "s）：Hello, nice to meet you. → " + translated;
+    }
+
+    /** 语音识别引擎卡片（设置页「语音识别」面板）。 */
+    public List<AsrEngineVO> listAsrEngines(Long userId) {
         UserSetting s = load(userId);
-        String base = has(baseUrl) ? baseUrl.trim() : (s == null ? null : s.getGeminiBaseUrl());
-        String key = has(apiKey) ? apiKey.trim() : (s == null ? null : s.getGeminiApiKey());
-        return fetchModels(base, key);
+        List<AsrEngineVO> out = new ArrayList<>();
+        // 卡片上的倍速取该引擎最常用的一档：本地=large-v3（默认推荐档），云端=Groq large-v3
+        out.add(new AsrEngineVO("local", "本地 Whisper", "内置离线识别，零配置免费，模型大小在任务里选（首次使用自动加载）",
+                "free", false, true, speedOf("local-large-v3")));
+        out.add(new AsrEngineVO("groq", "Groq 云端识别", "whisper-large-v3 云端加速，有免费额度；国内网络需要魔法",
+                "cloud", true, s != null && has(s.getGroqApiKey()), speedOf("groq")));
+        return out;
+    }
+
+    /**
+     * 任务表单里各识别档位的实测倍速，供前端算「预计耗时」。
+     * <p>本地档会按 ai-service 实际跑在 GPU 还是 CPU 上自动调整（见 {@link AsrSpeed}）。
+     */
+    public List<AsrSpeed.Option> asrSpeedOptions() {
+        return AsrSpeed.options(aiLauncher.resolvedDevice());
+    }
+
+    private double speedOf(String value) {
+        return asrSpeedOptions().stream()
+                .filter(o -> o.value().equals(value))
+                .findFirst().map(AsrSpeed.Option::speedFactor).orElse(0.0);
+    }
+
+
+    /**
+     * 拉取端点的可用模型列表（GET {baseUrl}/models，claude 协议换 x-api-key 头）。
+     * baseUrl/apiKey 传空则回退到当前生效的模型服务。
+     */
+    public List<String> listLlmModels(Long userId, String baseUrl, String apiKey, String protocol) {
+        String base = has(baseUrl) ? baseUrl.trim() : null;
+        String key = has(apiKey) ? apiKey.trim() : null;
+        String proto = has(protocol) ? protocol : LlmConfig.PROTO_OPENAI;
+        if (base == null || key == null) {
+            ModelService svc = activeLlmService(userId);
+            if (svc != null) {
+                if (base == null) base = svc.getBaseUrl();
+                if (key == null) key = svc.getApiKey();
+                if (!has(protocol)) proto = svc.getProtocol();
+            } else {
+                UserSetting s = load(userId);
+                if (base == null) base = s == null ? null : s.getLlmBaseUrl();
+                if (key == null) key = s == null ? null : s.getLlmApiKey();
+            }
+        }
+        if (has(base)) {
+            base = normalizeBaseUrl(base, proto);
+        }
+        return fetchModels(base, key, proto);
     }
 
     /**
@@ -390,26 +665,55 @@ public class SettingsService {
     }
 
     /**
-     * 拉取主/子 Agent 端点的模型列表。
-     * 回退链与 {@link #effectiveAgentMain}/{@link #effectiveAgentSub} 保持一致：
-     * 表单填了用表单 → 已存过该组 Agent 配置用已存的 → 都没有落到翻译模型配置。
+     * 拉取全能AI翻译各组端点（translate/main/sub）的模型列表。
+     * 回退链与 {@link #effectiveAgentTranslate}/{@link #effectiveAgentMain}/{@link #effectiveAgentSub} 保持一致：
+     * 表单填了用表单 → 已存过该组配置用已存的 → 都没有落到默认大语言模型服务。
      * 若不与运行时同链，按钮拉出来的列表就会和实际调用的端点对不上。
      */
-    public List<String> listAgentModels(Long userId, String baseUrl, String apiKey, boolean main) {
+    public List<String> listAgentModels(Long userId, String baseUrl, String apiKey, String mode) {
         UserSetting s = load(userId);
-        String savedBase = s == null ? null : (main ? s.getAgentMainBaseUrl() : s.getAgentSubBaseUrl());
-        String savedKey = s == null ? null : (main ? s.getAgentMainApiKey() : s.getAgentSubApiKey());
+        String savedBase = null;
+        String savedKey = null;
+        if (s != null) {
+            switch (mode) {
+                case "translate" -> {
+                    savedBase = s.getAgentTranslateBaseUrl();
+                    savedKey = s.getAgentTranslateApiKey();
+                }
+                case "main" -> {
+                    savedBase = s.getAgentMainBaseUrl();
+                    savedKey = s.getAgentMainApiKey();
+                }
+                default -> {
+                    savedBase = s.getAgentSubBaseUrl();
+                    savedKey = s.getAgentSubApiKey();
+                }
+            }
+        }
         String base = has(baseUrl) ? baseUrl.trim() : savedBase;
         String key = has(apiKey) ? apiKey.trim() : savedKey;
+        String proto = LlmConfig.PROTO_OPENAI;
         if (!has(base) || !has(key)) {
-            // 该组 Agent 未配置 → 回落翻译模型端点（与运行时 agentLlm 的回落一致）
-            base = s == null ? null : s.getLlmBaseUrl();
-            key = s == null ? null : s.getLlmApiKey();
+            // 该组未配置 → 回落当前生效的模型服务（与运行时回落一致）
+            ModelService svc = activeLlmService(userId);
+            if (svc != null) {
+                base = svc.getBaseUrl();
+                key = svc.getApiKey();
+                proto = svc.getProtocol();
+            } else {
+                base = s == null ? null : s.getLlmBaseUrl();
+                key = s == null ? null : s.getLlmApiKey();
+            }
         }
-        return fetchModels(base, key);
+        return fetchModels(base, key, proto);
     }
 
+    /** OpenAI 兼容端点的模型列表（旧签名，Gemini/TTS 复用）。 */
     private List<String> fetchModels(String base, String key) {
+        return fetchModels(base, key, LlmConfig.PROTO_OPENAI);
+    }
+
+    private List<String> fetchModels(String base, String key, String protocol) {
         if (!has(base)) {
             throw new BizException("请先填写 Base URL");
         }
@@ -425,11 +729,13 @@ public class SettingsService {
 
         String body;
         try {
-            body = client.get()
-                    .uri(url)
-                    .header("Authorization", "Bearer " + key)
-                    .retrieve()
-                    .body(String.class);
+            var spec = client.get().uri(url);
+            if (LlmConfig.PROTO_CLAUDE.equals(protocol)) {
+                spec = spec.header("x-api-key", key).header("anthropic-version", "2023-06-01");
+            } else {
+                spec = spec.header("Authorization", "Bearer " + key);
+            }
+            body = spec.retrieve().body(String.class);
         } catch (Exception e) {
             throw new BizException("拉取模型失败: " + e.getMessage());
         }

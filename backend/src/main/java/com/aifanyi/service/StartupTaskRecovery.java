@@ -1,7 +1,9 @@
 package com.aifanyi.service;
 
 import com.aifanyi.domain.TaskStatus;
+import com.aifanyi.entity.DocTranslation;
 import com.aifanyi.entity.TranslationTask;
+import com.aifanyi.mapper.DocTranslationMapper;
 import com.aifanyi.mapper.TranslationTaskMapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
@@ -21,6 +23,7 @@ import org.springframework.stereotype.Component;
 public class StartupTaskRecovery implements ApplicationRunner {
 
     private final TranslationTaskMapper taskMapper;
+    private final DocTranslationMapper docMapper;
 
     @Override
     public void run(ApplicationArguments args) {
@@ -40,6 +43,14 @@ public class StartupTaskRecovery implements ApplicationRunner {
                 .set(TranslationTask::getDubError, "后端重启导致配音中断，请重新配音"));
         if (d > 0) {
             log.warn("启动恢复：{} 个中断的配音已标记失败（可重新配音，翻译成果不受影响）", d);
+        }
+        // 文档翻译任务同款收尾：非终态一律 FAILED（异步线程已随重启消失）
+        int doc = docMapper.update(null, Wrappers.<DocTranslation>lambdaUpdate()
+                .notIn(DocTranslation::getStatus, "SUCCESS", "FAILED")
+                .set(DocTranslation::getStatus, "FAILED")
+                .set(DocTranslation::getErrorMsg, "后端重启导致任务中断，请重新上传翻译"));
+        if (doc > 0) {
+            log.warn("启动恢复：{} 个残留在运行中状态的文档翻译已标记 FAILED", doc);
         }
     }
 }

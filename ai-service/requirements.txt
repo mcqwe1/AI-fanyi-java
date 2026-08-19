@@ -15,6 +15,12 @@ edge-tts>=6.1.0
 # 缺失时 /embed 返回可读错误，Agent 模式退化为精确匹配，不影响转写/配音/翻译。
 fastembed>=0.4.0
 
+# PDF 版式保持翻译（文档模式）：版面分析模型 + 原位重排版，译文按原栏宽/字号重新流排，
+# 而不是把译文盖在原文上。走 app/pdf_runner.py 子进程调用（依赖树重，不常驻 ai-service）。
+# 首次运行需要约 340MB 资产（版面 ONNX + 嵌入字体），便携版随包预置离线包。
+# 缺失时 /pdf/translate 返回 501，后端自动退回内置 pdfbox 引擎，PDF 翻译不中断。
+babeldoc>=0.6.4
+
 # GPU（CUDA 12）运行库：CTranslate2 4.x 依赖 cuBLAS + cuDNN 9
 # 纯 CPU 跑可不装这两行
 nvidia-cublas-cu12

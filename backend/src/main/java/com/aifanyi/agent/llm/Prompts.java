@@ -37,10 +37,14 @@ public final class Prompts {
             sys.append('\n');
         }
         sys.append("\n【判定要求】\n")
-                .append("1. 可以命中多个领域（如医疗科普视频可能同时命中 medical 和 general）；\n")
-                .append("2. 每个命中给 0~1 的匹配分，只返回分数 ≥0.35 的；\n")
-                .append("3. 如果都不匹配，返回 general 兜底，并在 draft 字段给出这个新领域的档案草稿；\n")
-                .append("4. 不要臆测：只依据文本里真实出现的内容判断。\n\n");
+                .append("1. 每个档案的「——」后面是它的判定标准，这是唯一判定依据：")
+                .append("文本的主要内容明确落在该标准描述的范围内才算命中；")
+                .append("只是偶尔提到一两个相关词、或仅凭主题联想沾边的，一律不算命中。\n")
+                .append("2. 可以命中多个领域，但每个命中都必须能引用文本里的具体内容作为依据（写进 why）；\n")
+                .append("3. 每个命中给 0~1 的匹配分，只返回分数 ≥0.35 的；宁可少激活也不要错激活——")
+                .append("激活一个不相关的专家会污染术语表；\n")
+                .append("4. 如果都不匹配，返回 general 兜底，并在 draft 字段给出这个新领域的档案草稿；\n")
+                .append("5. 不要臆测：只依据文本里真实出现的内容判断。\n\n");
         sys.append("【输出格式】只返回 JSON，不要任何解释或代码块：\n")
                 .append("{\"matches\":[{\"domain\":\"领域code\",\"score\":0.9,\"why\":\"一句话依据\"}],")
                 .append("\"draft\":{\"domainCode\":\"新领域code\",\"name\":\"领域名\",")
@@ -58,6 +62,11 @@ public final class Prompts {
      * 提取候选术语 + 判定是否需要联网核实（合并成一次调用）。
      * <p>架构图把「提取候选」和「需联网?」画成两个 [1次]，但它们是对同一批数据的两个判断，
      * 拆成两次调用只增加一次往返延迟，不增加任何信息——30 秒预算下这次往返很宝贵。
+     *
+     * <p><b>2026-08 增补 strategy 字段</b>：它原先只在步骤 C 产出，而步骤 C 只处理
+     * needSearch=true 的词——于是不需要联网的词永远没有 strategy，
+     * {@link com.aifanyi.agent.node.TermTriage} 的规则 1（自拟译法必须锁定）对它们失效。
+     * 让抽词阶段一并吐出来，<b>不增加任何调用次数</b>，只是多返回一个字段。
      */
     public static AgentJsonClient.Prompt extract(AgentProfile profile, String digest,
                                                   String sourceLang, String targetLang) {
@@ -65,6 +74,15 @@ public final class Prompts {
         sys.append("你是「").append(profile.getName()).append("」领域的翻译术语专家。\n");
         sys.append("任务：从文本中找出翻译成").append(nz(targetLang))
                 .append("时必须【全篇统一、译法正确】的专业术语与专有名词。\n\n");
+
+        // 领域边界：用户在档案里写的「什么内容归我」是硬约束。没有这段时，
+        // 每个专家都会对全文抽词，把别的领域的内容也拿去处理（用户实际反馈的问题）。
+        if (notBlank(profile.getJudgeCriteria())) {
+            sys.append("【你的领域边界，必须严格遵守】\n")
+                    .append("你只负责满足以下判定标准的内容：").append(profile.getJudgeCriteria()).append('\n')
+                    .append("文本中不属于该范围的词——哪怕它看起来是术语——也不要提取，那是其他专家的职责；")
+                    .append("越界提取会污染术语表。拿不准是否属于你的范围时，不提。\n\n");
+        }
 
         if (notBlank(profile.getConventions())) {
             sys.append("【本领域翻译惯例，必须遵循】\n").append(profile.getConventions()).append("\n\n");
@@ -82,6 +100,14 @@ public final class Prompts {
         sys.append("【每个候选给出】\n")
                 .append("- source：原文形态（保持文本中的原样，不要改大小写）\n")
                 .append("- target：你的初步译法\n")
+                .append("- strategy：这个译法是怎么来的，五选一——\n")
+                .append("   AUTHORITATIVE 该词有公认/官方译名，你直接采用了它\n")
+                .append("   KEEP_ORIGINAL 保留原文不译（业界通用缩写、品牌官方写法）\n")
+                .append("   TRANSLITERATE 音译（人名、地名、无实义生造词）\n")
+                .append("   FREE 意译（含义清楚的复合词，按意思译）\n")
+                .append("   SOUND_MEANING 音意结合 / COINAGE 造词（前几种都不合适时）\n")
+                .append("  这个字段决定该词要不要被长期收录：没有公认答案、纯属你当次自拟的译法")
+                .append("（音译/造词/保留原文）必须锁定下来，否则下次会译成别的样子。请如实填。\n")
                 .append("- needSearch：是否需要联网核实。")
                 .append("你确信有公认译名且自己知道 → false；")
                 .append("生僻专名、可能有官方译名但你不确定、或存在多种流行译法 → true\n")
@@ -94,6 +120,7 @@ public final class Prompts {
 
         sys.append("【输出格式】只返回 JSON，不要解释、不要代码块：\n")
                 .append("{\"status\":\"DONE\",\"terms\":[{\"source\":\"...\",\"target\":\"...\",")
+                .append("\"strategy\":\"TRANSLITERATE\",")
                 .append("\"needSearch\":true,\"confidence\":\"high\",\"queries\":[\"...\"]}]}\n")
                 .append("没有值得收录的术语就返回 {\"status\":\"DONE\",\"terms\":[]}");
 
@@ -140,7 +167,8 @@ public final class Prompts {
                 .append("{\"terms\":[{\"source\":\"原文\",\"target\":\"终译\",")
                 .append("\"strategy\":\"AUTHORITATIVE|KEEP_ORIGINAL|TRANSLITERATE|FREE|SOUND_MEANING|COINAGE\",")
                 .append("\"evidence\":\"依据片段\",\"authorityUrl\":\"链接或空\",")
-                .append("\"confidence\":\"high|medium|low\",\"reason\":\"一句话理由\"}],")
+                .append("\"confidence\":\"high|medium|low\",")
+                .append("\"reason\":\"一句话向用户说明：这个词指什么、为何采用该译法（这句话会作为术语库里的说明展示）\"}],")
                 .append("\"profileProposal\":{\"conventionFixes\":[\"...\"],")
                 .append("\"addSearchHints\":[\"...\"],\"dropSearchHints\":[\"...\"]}}\n")
                 .append("source 必须与输入完全一致，每个输入术语返回恰好一条。");

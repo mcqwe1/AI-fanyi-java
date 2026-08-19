@@ -28,12 +28,17 @@ public class JwtUtil {
     }
 
     public String generate(Long userId, String username) {
+        return generate(userId, username, expireMillis);
+    }
+
+    /** 自定义有效期的签发（浏览器扩展等长效场景），复用同一密钥与校验链路。 */
+    public String generate(Long userId, String username, long ttlMillis) {
         Date now = new Date();
         return Jwts.builder()
                 .subject(username)
                 .claim("uid", userId)
                 .issuedAt(now)
-                .expiration(new Date(now.getTime() + expireMillis))
+                .expiration(new Date(now.getTime() + ttlMillis))
                 .signWith(key)
                 .compact();
     }

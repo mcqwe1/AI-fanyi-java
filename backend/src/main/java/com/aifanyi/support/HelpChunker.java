@@ -67,22 +67,48 @@ public final class HelpChunker {
             out.add(new Chunk(title, text));
             return;
         }
-        // 超长节：按空行段落聚合，攒到上限就出一块（段落本身超限时单独成块，不硬切句子）
+        // 超长节：按空行段落聚合，攒到上限就出一块（段落本身超限时再按行聚合，始终不硬切句子）
         StringBuilder piece = new StringBuilder();
         for (String para : text.split("\n\\s*\n")) {
             String p = para.strip();
             if (p.isEmpty()) {
                 continue;
             }
-            if (piece.length() > 0 && piece.length() + p.length() > MAX_CHARS) {
-                out.add(new Chunk(title, piece.toString().strip()));
-                piece.setLength(0);
+            for (String part : splitParagraph(p)) {
+                if (piece.length() > 0 && piece.length() + part.length() > MAX_CHARS) {
+                    out.add(new Chunk(title, piece.toString().strip()));
+                    piece.setLength(0);
+                }
+                piece.append(part).append("\n\n");
             }
-            piece.append(p).append("\n\n");
         }
         if (piece.length() > 0) {
             out.add(new Chunk(title, piece.toString().strip()));
         }
+    }
+
+    /**
+     * 段落自身仍超限时按行再聚合。markdown 的长条目列表整段没有空行，
+     * 光按段落切会留下一个几千字的巨块（嵌入必被截断）；行是天然边界，
+     * 单行再长也不切——切开的半句检索出来等于噪声。
+     */
+    private static List<String> splitParagraph(String p) {
+        if (p.length() <= MAX_CHARS) {
+            return List.of(p);
+        }
+        List<String> parts = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        for (String line : p.split("\n")) {
+            if (cur.length() > 0 && cur.length() + line.length() > MAX_CHARS) {
+                parts.add(cur.toString().strip());
+                cur.setLength(0);
+            }
+            cur.append(line).append('\n');
+        }
+        if (cur.length() > 0) {
+            parts.add(cur.toString().strip());
+        }
+        return parts;
     }
 
     /**

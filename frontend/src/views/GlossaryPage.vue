@@ -16,12 +16,13 @@
           </el-select>
           <el-input v-model="kw" placeholder="搜索原文 / 译法 / 说明" prefix-icon="el-icon-search"
                     clearable style="width:220px" />
-          <el-select v-model="catFilter" placeholder="类别" clearable style="width:140px">
-            <el-option v-for="c in categories" :key="c" :label="c" :value="c" />
-          </el-select>
           <el-select v-model="originFilter" placeholder="来源" clearable style="width:110px">
             <el-option label="自动" value="auto" />
             <el-option label="人工" value="manual" />
+          </el-select>
+          <el-select v-model="stateFilter" placeholder="状态" clearable style="width:120px">
+            <el-option label="已启用" value="on" />
+            <el-option label="备选待确认" value="candidate" />
           </el-select>
           <span class="spacer" />
           <el-button type="primary" icon="el-icon-plus" size="small" @click="openAdd">新增术语</el-button>
@@ -31,10 +32,22 @@
         </div>
       </el-card>
 
+      <!-- 备选提醒：全能AI翻译抽出但暂无佐证的词，等你点头才生效 -->
+      <el-alert v-if="candidateCount && stateFilter !== 'candidate'" type="info" show-icon
+                :closable="false" class="cand-tip">
+        <span slot="title">
+          有 <b>{{ candidateCount }}</b> 条备选术语待确认——全能AI翻译认为该固定译法，但暂时拿不出佐证，
+          所以先存着不生效。看一眼「说明」栏：对的打开启用开关，不对的直接删。
+        </span>
+        <el-button type="text" @click="stateFilter = 'candidate'">只看备选</el-button>
+      </el-alert>
+
       <!-- 术语表 -->
       <el-card class="panel">
         <div v-if="selection.length" class="batch-bar">
           <span>已选 <b>{{ selection.length }}</b> 条</span>
+          <el-button v-if="selection.some(t => !t.enabled)" size="mini" type="success" plain
+                     icon="el-icon-check" :loading="batchEnabling" @click="batchEnable">批量启用</el-button>
           <el-button size="mini" type="primary" plain icon="el-icon-right" @click="openTransfer('move')">移动到…</el-button>
           <el-button size="mini" type="primary" plain icon="el-icon-document-copy" @click="openTransfer('copy')">复制到…</el-button>
           <el-button size="mini" type="danger" plain icon="el-icon-delete" @click="batchRemove">批量删除</el-button>
@@ -44,16 +57,20 @@
           <el-table-column type="selection" width="42" />
           <el-table-column prop="sourceTerm" label="原文" min-width="140" show-overflow-tooltip />
           <el-table-column prop="targetTerm" label="译法" min-width="140" show-overflow-tooltip />
-          <el-table-column prop="category" label="类别" width="130">
-            <template slot-scope="{ row }">{{ row.category || '—' }}</template>
-          </el-table-column>
-          <el-table-column prop="note" label="说明" min-width="160" show-overflow-tooltip>
+          <el-table-column prop="note" label="说明" min-width="200" show-overflow-tooltip>
             <template slot-scope="{ row }">{{ row.note || '—' }}</template>
           </el-table-column>
           <el-table-column label="来源" width="70">
             <template slot-scope="{ row }">
-              <el-tag size="mini" :type="row.origin === 'auto' ? 'warning' : 'info'">
-                {{ row.origin === 'auto' ? '自动' : '人工' }}
+              <el-tag size="mini" :type="row.origin === 'manual' ? 'info' : 'warning'">
+                {{ row.origin === 'manual' ? '人工' : '自动' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="76">
+            <template slot-scope="{ row }">
+              <el-tag size="mini" :type="row.enabled ? 'success' : 'warning'" effect="plain">
+                {{ row.enabled ? '已启用' : '备选' }}
               </el-tag>
             </template>
           </el-table-column>
@@ -94,13 +111,8 @@
         <el-form-item label="译法">
           <el-input v-model="termForm.targetTerm" maxlength="200" placeholder="指定译法（必填）" />
         </el-form-item>
-        <el-form-item label="类别">
-          <el-select v-model="termForm.category" placeholder="类别" filterable allow-create clearable style="width:100%">
-            <el-option v-for="c in categories" :key="c" :label="c" :value="c" />
-          </el-select>
-        </el-form-item>
         <el-form-item label="说明">
-          <el-input v-model="termForm.note" maxlength="500" placeholder="依据 / 备注" />
+          <el-input v-model="termForm.note" maxlength="500" placeholder="这个词指什么 / 为何这样译" />
         </el-form-item>
         <el-form-item label="启用">
           <el-switch v-model="termForm.enabled" :active-value="1" :inactive-value="0" />
@@ -134,7 +146,7 @@
     <!-- 新建项目弹窗 -->
     <el-dialog title="新建系列项目" :visible.sync="newProjVisible" width="420px">
       <el-form label-width="80px">
-        <el-form-item label="项目名"><el-input v-model="newProj.name" placeholder="如：本多频道" /></el-form-item>
+        <el-form-item label="项目名"><el-input v-model="newProj.name" placeholder="如：奥特曼系列" /></el-form-item>
         <el-form-item label="源语言">
           <el-select v-model="newProj.sourceLang" filterable style="width:100%">
             <el-option label="自动检测" value="auto" />
@@ -162,26 +174,25 @@
 <script>
 import http from '../api/http'
 import { LANG_GROUPS } from '../constants/langs'
-import { TERM_CATEGORIES } from '../constants/kb'
 
 export default {
   name: 'GlossaryPage',
   data () {
     return {
-      categories: TERM_CATEGORIES,
       langGroups: LANG_GROUPS,
       projects: [],
       projectFilter: 'all',
       terms: [],
       loading: false,
       kw: '',
-      catFilter: '',
       originFilter: '',
+      stateFilter: '',
+      batchEnabling: false,
       selection: [],
       // 术语弹窗
       termVisible: false,
       savingTerm: false,
-      termForm: { id: null, projectId: null, sourceTerm: '', targetTerm: '', category: '', note: '', enabled: 1 },
+      termForm: { id: null, projectId: null, sourceTerm: '', targetTerm: '', note: '', enabled: 1 },
       // 移动/复制弹窗
       transferVisible: false,
       transferMode: 'move',
@@ -194,11 +205,18 @@ export default {
     }
   },
   computed: {
+    /** 待用户点头的备选术语数（enabled=0 即为未生效） */
+    candidateCount () {
+      return this.terms.filter(t => !t.enabled).length
+    },
     filteredTerms () {
       const kw = this.kw.trim().toLowerCase()
       return this.terms.filter(t => {
-        if (this.catFilter && t.category !== this.catFilter) return false
-        if (this.originFilter && t.origin !== this.originFilter) return false
+        // 来源只分两档：manual=人工，其余（auto / 历史 agent）都算自动
+        if (this.originFilter === 'manual' && t.origin !== 'manual') return false
+        if (this.originFilter === 'auto' && t.origin === 'manual') return false
+        if (this.stateFilter === 'on' && !t.enabled) return false
+        if (this.stateFilter === 'candidate' && t.enabled) return false
         if (kw) {
           const hay = `${t.sourceTerm || ''}\n${t.targetTerm || ''}\n${t.note || ''}`.toLowerCase()
           if (!hay.includes(kw)) return false
@@ -245,7 +263,7 @@ export default {
       this.termForm = {
         id: null,
         projectId: this.projectFilter !== 'all' ? this.projectFilter : this.projects[0].id,
-        sourceTerm: '', targetTerm: '', category: '', note: '', enabled: 1
+        sourceTerm: '', targetTerm: '', note: '', enabled: 1
       }
       this.termVisible = true
     },
@@ -253,7 +271,7 @@ export default {
       this.termForm = {
         id: row.id, projectId: row.projectId,
         sourceTerm: row.sourceTerm, targetTerm: row.targetTerm,
-        category: row.category || '', note: row.note || '', enabled: row.enabled
+        note: row.note || '', enabled: row.enabled
       }
       this.termVisible = true
     },
@@ -264,7 +282,7 @@ export default {
       try {
         await http.put(`/kb/projects/${f.projectId}/terms`, {
           terms: [{ id: f.id, sourceTerm: f.sourceTerm, targetTerm: f.targetTerm,
-                    category: f.category, note: f.note, enabled: f.enabled }]
+                    note: f.note, enabled: f.enabled }]
         })
         this.$message.success(f.id ? '已保存' : '已新增')
         this.termVisible = false
@@ -275,10 +293,29 @@ export default {
       try {
         await http.put(`/kb/projects/${row.projectId}/terms`, {
           terms: [{ id: row.id, sourceTerm: row.sourceTerm, targetTerm: row.targetTerm,
-                    category: row.category, note: row.note, enabled: v }]
+                    note: row.note, enabled: v }]
         })
         row.enabled = v
       } catch (e) { /* 拦截器已提示 */ }
+    },
+    /** 批量启用备选词：按项目分组提交，一个项目一次请求 */
+    async batchEnable () {
+      const pending = this.selection.filter(t => !t.enabled)
+      if (!pending.length) return
+      this.batchEnabling = true
+      try {
+        const byProject = new Map()
+        pending.forEach(t => {
+          if (!byProject.has(t.projectId)) byProject.set(t.projectId, [])
+          byProject.get(t.projectId).push({
+            id: t.id, sourceTerm: t.sourceTerm, targetTerm: t.targetTerm, note: t.note, enabled: 1
+          })
+        })
+        await Promise.all([...byProject.entries()].map(([pid, terms]) =>
+          http.put(`/kb/projects/${pid}/terms`, { terms })))
+        this.$message.success(`已启用 ${pending.length} 条`)
+        this.reload()
+      } catch (e) { /* 拦截器已提示 */ } finally { this.batchEnabling = false }
     },
     /* ---------- 删 ---------- */
     removeOne (row) {
@@ -365,4 +402,6 @@ export default {
   padding: 8px 12px; background: #eef2ff; border-radius: 8px; font-size: 13px;
 }
 .dlg-tip { margin: 0 0 14px; color: #666; font-size: 13px; line-height: 1.6; }
+.cand-tip { align-items: center; }
+.cand-tip >>> .el-alert__title { font-weight: normal; line-height: 1.7; }
 </style>

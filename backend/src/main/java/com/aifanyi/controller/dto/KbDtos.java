@@ -15,15 +15,17 @@ public class KbDtos {
     }
 
     public record TermVO(
-            Long id, String sourceTerm, String targetTerm, String category, String note,
-            String origin, Integer enabled
+            Long id, String sourceTerm, String targetTerm, String note,
+            String origin, Integer enabled,
+            /** ACTIVE=已启用 / CANDIDATE=Agent 抽出但暂无佐证的备选，待用户点头；手工录入为 ACTIVE */
+            String status
     ) {
     }
 
     /** 批量保存术语：有 id 视为更新，无 id 视为新增（origin=manual）。 */
     public record SaveTermsReq(List<TermInput> terms) {
         public record TermInput(Long id, String sourceTerm, String targetTerm,
-                                String category, String note, Integer enabled) {
+                                String note, Integer enabled) {
         }
     }
 

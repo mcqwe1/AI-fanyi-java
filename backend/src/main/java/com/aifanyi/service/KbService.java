@@ -66,7 +66,10 @@ public class KbService {
                         .orderByDesc(GlossaryTerm::getId))
                 .stream()
                 .map(t -> new TermVO(t.getId(), t.getSourceTerm(), t.getTargetTerm(),
-                        t.getCategory(), t.getNote(), t.getOrigin(), t.getEnabled()))
+                        t.getNote(), t.getOrigin(), t.getEnabled(),
+                        // 存量行可能是旧枚举名（VERIFIED/PENDING…），统一归一后再给前端
+                        t.getStatus() == null ? null
+                                : String.valueOf(com.aifanyi.agent.model.TermState.parse(t.getStatus()))))
                 .toList();
     }
 
@@ -82,27 +85,23 @@ public class KbService {
                 if (t == null || !t.getProjectId().equals(projectId)) continue;
                 t.setSourceTerm(in.sourceTerm().trim());
                 t.setTargetTerm(in.targetTerm().trim());
-                t.setCategory(in.category());
                 t.setNote(in.note());
                 if (in.enabled() != null) t.setEnabled(in.enabled());
-                // 数据飞轮：用户亲手改过的条目即最高可信度，此后 Agent 不再覆盖它
-                // （TermStateMachine 见 origin=manual 或 status=VERIFIED 一律跳过）。
+                // 数据飞轮：用户亲手改过的条目即最终结论，此后 Agent 一律不覆盖
+                // （TermStateMachine 对任何已存在的条目都只增不改）。
                 // 这让现有术语库 UI 零改动就成了 Agent 的人工校正入口。
                 t.setOrigin("manual");
-                t.setStatus(com.aifanyi.agent.model.TermState.VERIFIED.name());
-                t.setConfidence(java.math.BigDecimal.ONE);
+                t.setStatus(com.aifanyi.agent.model.TermState.ACTIVE.name());
                 termMapper.updateById(t);
             } else {
                 GlossaryTerm t = new GlossaryTerm();
                 t.setProjectId(projectId);
                 t.setSourceTerm(in.sourceTerm().trim());
                 t.setTargetTerm(in.targetTerm().trim());
-                t.setCategory(in.category());
                 t.setNote(in.note());
                 t.setOrigin("manual");
-                // 手工录入同样是用户意图，直接顶格可信
-                t.setStatus(com.aifanyi.agent.model.TermState.VERIFIED.name());
-                t.setConfidence(java.math.BigDecimal.ONE);
+                // 手工录入同样是用户意图，直接启用
+                t.setStatus(com.aifanyi.agent.model.TermState.ACTIVE.name());
                 t.setEnabled(in.enabled() == null ? 1 : in.enabled());
                 termMapper.insert(t);
             }
@@ -142,7 +141,6 @@ public class KbService {
                 c.setProjectId(target.getId());
                 c.setSourceTerm(t.getSourceTerm());
                 c.setTargetTerm(t.getTargetTerm());
-                c.setCategory(t.getCategory());
                 c.setNote(t.getNote());
                 c.setOrigin(t.getOrigin());
                 c.setEnabled(t.getEnabled());
@@ -191,6 +189,57 @@ public class KbService {
             throw new BizException(404, "项目不存在");
         }
         return p;
+    }
+
+    /**
+     * 载入用户勾选的若干术语桶为 原文→译法 注入映射（普通/KB/Agent 任务共用）。
+     * <p>idsCsv 为 kb_project id 逗号串（前端多选），逐个校验归属，越权/非法 id 静默丢弃；
+     * appendProjectId 追加在最后（KB 模式的专属桶 → 同名术语以它为准）。
+     * 结果长词优先排序，与 OpenAiTranslator 的按序注入约定一致。
+     */
+    public java.util.Map<String, String> loadForInjection(Long userId, String idsCsv, Long appendProjectId) {
+        List<Long> ids = new java.util.ArrayList<>();
+        if (StringUtils.hasText(idsCsv)) {
+            for (String p : idsCsv.split(",")) {
+                try {
+                    ids.add(Long.parseLong(p.trim()));
+                } catch (NumberFormatException ignore) {
+                    // 非法片段直接丢弃
+                }
+            }
+        }
+        if (appendProjectId != null) {
+            ids.remove(appendProjectId);
+            ids.add(appendProjectId);
+        }
+        if (ids.isEmpty()) {
+            return java.util.Map.of();
+        }
+        Set<Long> owned = projectMapper.selectList(Wrappers.<KbProject>lambdaQuery()
+                        .eq(KbProject::getUserId, userId)
+                        .in(KbProject::getId, ids))
+                .stream().map(KbProject::getId).collect(Collectors.toSet());
+
+        List<GlossaryTerm> terms = new java.util.ArrayList<>();
+        for (Long pid : ids) {
+            if (!owned.contains(pid)) {
+                continue;
+            }
+            terms.addAll(termMapper.selectList(Wrappers.<GlossaryTerm>lambdaQuery()
+                    .eq(GlossaryTerm::getProjectId, pid)
+                    .eq(GlossaryTerm::getEnabled, 1)));
+        }
+        // 长词优先（稳定排序保持桶序 → 同名词后面的桶覆盖前面的）
+        terms.sort((a, b) -> Integer.compare(
+                b.getSourceTerm() == null ? 0 : b.getSourceTerm().length(),
+                a.getSourceTerm() == null ? 0 : a.getSourceTerm().length()));
+        java.util.Map<String, String> map = new java.util.LinkedHashMap<>();
+        for (GlossaryTerm t : terms) {
+            if (t.getSourceTerm() != null && t.getTargetTerm() != null) {
+                map.put(t.getSourceTerm(), t.getTargetTerm());
+            }
+        }
+        return map;
     }
 
     private int countTerms(Long projectId) {

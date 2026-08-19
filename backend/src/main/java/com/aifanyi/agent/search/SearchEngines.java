@@ -21,7 +21,6 @@ public final class SearchEngines {
         /** Serper：Google 搜索结果 API */
         SERPER,
         /** 复用带 -search 后缀的联网模型（次数不可控，仅兜底） */
-        SEARCH_MODEL,
         /** 不联网 */
         NONE
     }
@@ -72,18 +71,12 @@ public final class SearchEngines {
             "cloud", true, "https://google.serper.dev", Wire.SERPER, 5,
             AUTHORITY_GLOBAL);
 
-    public static final Engine SEARCH_MODEL = new Engine(
-            "search-model", "联网模型（-search 后缀）",
-            "复用已配置的 Gemini 反代联网模型。查询次数不可控、延迟高（实测长文本可达数分钟），仅在没有其他搜索源时作兜底。",
-            "custom", false, "", Wire.SEARCH_MODEL, 3,
-            AUTHORITY_GLOBAL);
-
     public static final Engine NONE = new Engine(
             "none", "不联网",
             "子 Agent 仅用模型自身知识与上下文证据定译。最快最省，但生僻专名的译法准确率下降。",
             "free", false, "", Wire.NONE, 0, List.of());
 
-    private static final List<Engine> ALL = List.of(TAVILY, BOCHA, SERPER, SEARCH_MODEL, NONE);
+    private static final List<Engine> ALL = List.of(TAVILY, BOCHA, SERPER, NONE);
 
     private SearchEngines() {
     }

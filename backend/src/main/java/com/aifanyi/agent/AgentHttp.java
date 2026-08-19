@@ -33,6 +33,12 @@ public class AgentHttp {
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .followRedirects(HttpClient.Redirect.NORMAL)
+            // 必须锁 HTTP/1.1：默认 HTTP_2 对 http:// 目标会发 h2c 升级头（Upgrade: h2c），
+            // 本机 uvicorn（/ocr、/embed）不支持该升级且会丢请求体——FastAPI 看到空 body
+            // 直接 422，还在日志刷 "Invalid HTTP request received"。实测踩坑：图片翻译
+            // 全链路 422，且 /embed 早已因此静默降级（它失败不报错，一直没暴露）。
+            // https 目标走 ALPN 不受影响，锁 1.1 只是放弃了用不上的多路复用。
+            .version(HttpClient.Version.HTTP_1_1)
             .build();
 
     /** HTTP 调用结果：状态码 + 响应体。非 2xx 也正常返回，由调用方决定降级方式。 */

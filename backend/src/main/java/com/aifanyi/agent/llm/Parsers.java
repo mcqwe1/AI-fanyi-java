@@ -47,7 +47,10 @@ public final class Parsers {
                     }
                 }
             }
-            out.add(TermDraft.of(source.trim(), target.trim(), needSearch, conf, queries, profileCode));
+            out.add(TermDraft.of(source.trim(), target.trim(), needSearch, conf, queries, profileCode)
+                    // 步骤 A 就带上策略：不需要联网的词不会进步骤 C，
+                    // 没有这一步它们永远拿不到 strategy，分诊规则 1 对它们形同虚设
+                    .withStrategy(Strategy.parse(text(t, "strategy"))));
         }
         return out;
     }

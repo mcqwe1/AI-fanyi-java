@@ -39,6 +39,8 @@ public class TextTranslateService {
     private static final int TARGET_BATCH_CHARS = 3000;
     private static final int HISTORY_LIMIT = 50;
     private static final int PREVIEW_CHARS = 50;
+    /** 扩展渠道前缀：ext_text / ext_page / ext_image / ext_input，见 {@link TextTranslation#getChannel()} */
+    private static final String EXT_CHANNEL_PREFIX = "ext_";
 
     private final SettingsService settings;
     private final LlmTranslator translator;
@@ -58,6 +60,11 @@ public class TextTranslateService {
     }
 
     public TextTranslateResp translate(Long userId, TextTranslateReq req) {
+        return translate(userId, req, "text");
+    }
+
+    /** channel 标记历史来源渠道（text/file/ext_text/ext_page/ext_image），见 {@link TextTranslation#getChannel()}。 */
+    public TextTranslateResp translate(Long userId, TextTranslateReq req, String channel) {
         String targetLang = StringUtils.hasText(req.targetLang()) ? req.targetLang().trim() : "中文";
         String stylePrompt = TaskService.normalizeStylePrompt(req.stylePrompt());
         String text = req.text() == null ? "" : req.text().replace("\r\n", "\n").replace('\r', '\n');
@@ -91,12 +98,13 @@ public class TextTranslateService {
             throw new BizException("未检测到可翻译内容");
         }
 
-        // 动态批大小：字幕式短行顶到 40 行/批（与视频链路一致），整段长文压到 1~3 块/批
+        // 动态批大小：字幕式短行顶到 40 行/批（与视频链路一致），整段长文压到 1~3 块/批。
+        // 必须用 withBatchSize 而不是重新 new：后者会把用户选的协议（claude/deepl/谷歌/微软）
+        // 和自定义超时静默改回 openai + 60s，端点当场打不通。
         LlmConfig base = settings.effectiveLlm(userId);
         long avgLen = Math.max(1, sendChars / toSend.size());
         int batch = (int) Math.max(1, Math.min(40, TARGET_BATCH_CHARS / avgLen));
-        LlmConfig cfg = new LlmConfig(base.baseUrl(), base.apiKey(), base.model(),
-                base.disableThinking(), batch, base.concurrency());
+        LlmConfig cfg = base.withBatchSize(batch);
         log.info("文本翻译：{} 字符 / {} 块，batchSize={}，模型 {}", text.length(), toSend.size(), batch, cfg.model());
 
         long t0 = System.currentTimeMillis();
@@ -117,6 +125,7 @@ public class TextTranslateService {
 
         TextTranslation row = new TextTranslation();
         row.setUserId(userId);
+        row.setChannel(channel == null ? "text" : channel);
         row.setTargetLang(targetLang);
         row.setStylePrompt(stylePrompt);
         row.setPreview(buildPreview(text));
@@ -151,8 +160,8 @@ public class TextTranslateService {
 
         boolean subtitle = ext.equals("srt") || ext.equals("vtt");
         TextTranslateResp base = subtitle
-                ? translate(userId, new TextTranslateReq(extractSubtitleText(content), targetLang, stylePrompt))
-                : translate(userId, new TextTranslateReq(content, targetLang, stylePrompt));
+                ? translate(userId, new TextTranslateReq(extractSubtitleText(content), targetLang, stylePrompt), "file")
+                : translate(userId, new TextTranslateReq(content, targetLang, stylePrompt), "file");
 
         String outFormat = subtitle ? ext : (ext.equals("markdown") ? "md" : ext);
         String outName = baseName(originalName) + "." + targetTag(targetLang) + "." + outFormat;
@@ -207,18 +216,40 @@ public class TextTranslateService {
         return t.isEmpty() ? "译文" : t.replaceAll("[\\s\\\\/]", "");
     }
 
-    /** 历史列表（当前用户，最新在前；只取轻量列，不拉 MEDIUMTEXT 大字段）。 */
+    /**
+     * 文本翻译历史（当前用户，最新在前；只取轻量列，不拉 MEDIUMTEXT 大字段）。
+     * 2026-08 需求改版：扩展渠道（channel 以 ext_ 开头）的记录归「划词翻译」页自己的历史，
+     * 不再混进本列表——见 {@link #extHistory(Long)}。
+     */
     public List<HistoryItem> history(Long userId) {
-        List<TextTranslation> rows = mapper.selectList(Wrappers.<TextTranslation>lambdaQuery()
-                .select(TextTranslation::getId, TextTranslation::getTargetLang, TextTranslation::getPreview,
-                        TextTranslation::getModel, TextTranslation::getElapsedMs,
-                        TextTranslation::getUntranslatedLines, TextTranslation::getCreatedAt)
-                .eq(TextTranslation::getUserId, userId)
+        return listHistory(userId, false);
+    }
+
+    /** 划词翻译（浏览器扩展）历史：划词 / 整页 / 图片 / 输入框，与文本翻译历史互不相见。 */
+    public List<HistoryItem> extHistory(Long userId) {
+        return listHistory(userId, true);
+    }
+
+    private List<HistoryItem> listHistory(Long userId, boolean ext) {
+        com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TextTranslation> q =
+                Wrappers.<TextTranslation>lambdaQuery()
+                        .select(TextTranslation::getId, TextTranslation::getChannel, TextTranslation::getTargetLang,
+                                TextTranslation::getPreview,
+                                TextTranslation::getModel, TextTranslation::getElapsedMs,
+                                TextTranslation::getUntranslatedLines, TextTranslation::getCreatedAt)
+                        .eq(TextTranslation::getUserId, userId);
+        // channel NOT NULL DEFAULT 'text'，前缀匹配即可把扩展渠道和文本渠道分成互补的两半
+        if (ext) {
+            q.likeRight(TextTranslation::getChannel, EXT_CHANNEL_PREFIX);
+        } else {
+            q.notLikeRight(TextTranslation::getChannel, EXT_CHANNEL_PREFIX);
+        }
+        List<TextTranslation> rows = mapper.selectList(q
                 .orderByDesc(TextTranslation::getId)
                 .last("limit " + HISTORY_LIMIT));
         List<HistoryItem> items = new ArrayList<>(rows.size());
         for (TextTranslation r : rows) {
-            items.add(new HistoryItem(r.getId(), r.getTargetLang(), r.getPreview(), r.getModel(),
+            items.add(new HistoryItem(r.getId(), r.getChannel(), r.getTargetLang(), r.getPreview(), r.getModel(),
                     r.getElapsedMs() == null ? 0 : r.getElapsedMs(),
                     r.getUntranslatedLines() == null ? 0 : r.getUntranslatedLines(),
                     r.getCreatedAt()));
@@ -227,7 +258,12 @@ public class TextTranslateService {
     }
 
     public HistoryDetail detail(Long userId, Long id) {
-        TextTranslation r = getOwned(userId, id);
+        return detail(userId, id, null);
+    }
+
+    /** ext=true 只允许读扩展记录、false 只允许读文本记录、null 不限（两边入口各管各的，防止串页操作）。 */
+    public HistoryDetail detail(Long userId, Long id, Boolean ext) {
+        TextTranslation r = getOwned(userId, id, ext);
         List<Line> lines = readLines(r.getPairsJson());
         return new HistoryDetail(r.getId(), r.getTargetLang(), r.getSourceText(), r.getStylePrompt(),
                 lines, r.getPlainTarget(),
@@ -236,17 +272,35 @@ public class TextTranslateService {
     }
 
     public void remove(Long userId, Long id) {
-        getOwned(userId, id);
+        remove(userId, id, null);
+    }
+
+    public void remove(Long userId, Long id, Boolean ext) {
+        getOwned(userId, id, ext);
         mapper.deleteById(id);
     }
 
-    /** 归属校验：不存在或不属于当前用户一律按不存在处理。 */
-    private TextTranslation getOwned(Long userId, Long id) {
+    /** 清空当前用户的全部划词翻译历史，返回删除条数（逻辑删除）。 */
+    public int clearExtHistory(Long userId) {
+        return mapper.delete(Wrappers.<TextTranslation>lambdaQuery()
+                .eq(TextTranslation::getUserId, userId)
+                .likeRight(TextTranslation::getChannel, EXT_CHANNEL_PREFIX));
+    }
+
+    /** 归属校验：不存在、不属于当前用户、或渠道对不上入口，一律按不存在处理。 */
+    private TextTranslation getOwned(Long userId, Long id, Boolean ext) {
         TextTranslation r = mapper.selectById(id);
         if (r == null || !r.getUserId().equals(userId)) {
             throw new BizException("记录不存在");
         }
+        if (ext != null && isExt(r.getChannel()) != ext) {
+            throw new BizException("记录不存在");
+        }
         return r;
+    }
+
+    private static boolean isExt(String channel) {
+        return channel != null && channel.startsWith(EXT_CHANNEL_PREFIX);
     }
 
     /**

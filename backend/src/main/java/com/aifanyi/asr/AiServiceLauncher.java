@@ -135,4 +135,42 @@ public class AiServiceLauncher {
             return false;
         }
     }
+
+    /**
+     * 本地转写实际跑在 GPU 还是 CPU。
+     *
+     * <p>只看 /health 里 faster-whisper 首次加载后回填的 resolved.device，
+     * <b>模型没加载过时返回 null</b>（还不知道，别猜）。给「预计耗时」用：
+     * 同一段音频 GPU 与 CPU 差好几倍，用一个数糊弄会把预估变成误导。
+     * 结果缓存住——device 一旦定下来，除非重启 ai-service 不会变。
+     */
+    public String resolvedDevice() {
+        if (cachedDevice != null) {
+            return cachedDevice;
+        }
+        try {
+            HttpURLConnection c = (HttpURLConnection) URI.create(
+                    cfg.getBaseUrl().replaceAll("/+$", "") + "/health").toURL().openConnection();
+            c.setConnectTimeout(800);
+            c.setReadTimeout(1500);
+            if (c.getResponseCode() != 200) {
+                return null;
+            }
+            String body = new String(c.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            c.disconnect();
+            // {"status":"ok","resolved":{"device":"cuda",...}}；resolved 为 null 表示模型还没加载
+            java.util.regex.Matcher m = DEVICE_PATTERN.matcher(body);
+            if (m.find()) {
+                cachedDevice = m.group(1);
+                return cachedDevice;
+            }
+        } catch (Exception e) {
+            log.debug("探测 ai-service device 失败（按未知处理）: {}", e.toString());
+        }
+        return null;
+    }
+
+    private static final java.util.regex.Pattern DEVICE_PATTERN =
+            java.util.regex.Pattern.compile("\"device\"\\s*:\\s*\"([a-zA-Z0-9_]+)\"");
+    private volatile String cachedDevice;
 }

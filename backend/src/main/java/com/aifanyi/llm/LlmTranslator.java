@@ -33,6 +33,19 @@ public interface LlmTranslator {
      *
      * @param stylePrompt 用户自定义翻译风格提示词（如"古风文雅"）；null/空白 = 不指定风格
      */
+    default List<String> translate(List<String> sources, String targetLang, LlmConfig cfg,
+                                   Map<String, String> glossary, String stylePrompt) {
+        return translate(sources, targetLang, cfg, glossary, stylePrompt, TranslateHooks.none());
+    }
+
+    /**
+     * 带旁路钩子的完整形态：可实时拿进度、可中途叫停。
+     *
+     * <p>有了 {@link TranslateHooks#onLineDone()}，调用方不必再为了刷进度条把任务
+     * 切成一波一波地等——那种写法每波都要等最慢的一批
+     * （实测 1778 行因此多花 16 秒，见 {@code DocTranslateService}）。
+     */
     List<String> translate(List<String> sources, String targetLang, LlmConfig cfg,
-                           Map<String, String> glossary, String stylePrompt);
+                           Map<String, String> glossary, String stylePrompt,
+                           TranslateHooks hooks);
 }

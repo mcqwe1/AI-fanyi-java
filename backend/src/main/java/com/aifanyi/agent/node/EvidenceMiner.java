@@ -23,6 +23,9 @@ public final class EvidenceMiner {
     private static final int MAX_PER_TERM = 2;
     /** 定义句最长截取（超长的取前段，够模型判断即可） */
     private static final int MAX_SENTENCE = 200;
+    /** 中日韩字符：出现次数统计据此决定走词边界正则还是子串计数 */
+    private static final Pattern CJK =
+            Pattern.compile("[\\u4e00-\\u9fa5\\u3040-\\u30ff\\uac00-\\ud7af]");
 
     /**
      * 定义句模板。{T} 处填术语（已转义）。
@@ -101,16 +104,44 @@ public final class EvidenceMiner {
 
     /**
      * 统计术语在全文的出现次数。
-     * <p>这是架构说的「免费信号」：跨分片一致性占置信度 0.35 权重，而次数由代码在<b>全文</b>
-     * 精确数出，不受喂给模型的摘要抽样影响，也不花一个 token。
+     * <p>这是「免费信号」：由代码在<b>全文</b>精确数出，不受喂给模型的摘要抽样影响，
+     * 也不花一个 token。{@link TermTriage} 的规则 3（复合术语反复出现）直接建在这个数上。
+     *
+     * <p><b>必须卡词边界</b>（2026-08 修）：旧版直接 indexOf 数子串，
+     * 数 "API" 会把 r<b>api</b>d、c<b>api</b>tal 算进去，数 "AI" 会把
+     * ag<b>ai</b>n、s<b>ai</b>d、tr<b>ai</b>ning、m<b>ai</b>ntain 全算进去——
+     * 英文素材里短词的次数是虚高的，直接污染收录判定。
+     * <p>中日韩没有词间空格，词边界概念不适用（也不能用 {@code \b}，
+     * 它在 CJK 与标点之间的行为并非我们想要的），继续走子串计数。
      */
     public static int countOccurrences(String fullText, String term) {
         if (fullText == null || term == null || term.isBlank()) {
             return 0;
         }
+        String needle = term.trim();
+        if (CJK.matcher(needle).find()) {
+            return countSubstring(fullText, needle);
+        }
+        try {
+            // 用 lookaround 而非 \b：术语可能以非单词字符开头/结尾（.NET、C++），\b 在那里会失效
+            Pattern p = Pattern.compile(
+                    "(?<![A-Za-z0-9])" + Pattern.quote(needle) + "(?![A-Za-z0-9])",
+                    Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+            Matcher m = p.matcher(fullText);
+            int n = 0;
+            while (m.find()) {
+                n++;
+            }
+            return n;
+        } catch (Exception e) {
+            return countSubstring(fullText, needle);     // 正则兜不住时退回子串，宁可虚高也别报 0
+        }
+    }
+
+    /** 大小写不敏感的子串计数（CJK 路径与正则失败的兜底）。 */
+    private static int countSubstring(String fullText, String term) {
         int n = 0;
         int i = 0;
-        // 大小写不敏感计数（API/api 视为同一词的出现）
         String hay = fullText.toLowerCase(java.util.Locale.ROOT);
         String needle = term.toLowerCase(java.util.Locale.ROOT);
         while ((i = hay.indexOf(needle, i)) >= 0) {

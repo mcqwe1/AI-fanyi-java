@@ -10,12 +10,18 @@ CREATE TABLE IF NOT EXISTS `user` (
   `username`   VARCHAR(64)  NOT NULL,
   `password`   VARCHAR(100) NOT NULL,
   `nickname`   VARCHAR(64)  DEFAULT NULL,
+  `role`       VARCHAR(16)  NOT NULL DEFAULT 'USER',
+  `enabled`    TINYINT      NOT NULL DEFAULT 1,
   `deleted`    TINYINT      NOT NULL DEFAULT 0,
   `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   CONSTRAINT `uk_username` UNIQUE (`username`)
 );
+
+-- 兼容已有数据库：新增管理员权限字段
+ALTER TABLE `user` ADD COLUMN IF NOT EXISTS `role` VARCHAR(16) NOT NULL DEFAULT 'USER';
+ALTER TABLE `user` ADD COLUMN IF NOT EXISTS `enabled` TINYINT NOT NULL DEFAULT 1;
 
 -- 翻译任务
 CREATE TABLE IF NOT EXISTS `translation_task` (
@@ -66,6 +72,8 @@ ALTER TABLE `translation_task` ADD COLUMN IF NOT EXISTS `dub_progress` INT NOT N
 ALTER TABLE `translation_task` ADD COLUMN IF NOT EXISTS `dub_error` VARCHAR(1000) DEFAULT NULL;
 -- 配音成功但有需要用户知晓的情况（如某些行译文过长、变速后仍与下一行重叠）
 ALTER TABLE `translation_task` ADD COLUMN IF NOT EXISTS `dub_notice` VARCHAR(500) DEFAULT NULL;
+-- 2026-08 需求改版：普通/Agent 任务可勾选若干术语库（kb_project id 逗号分隔），术语以提示词注入翻译
+ALTER TABLE `translation_task` ADD COLUMN IF NOT EXISTS `glossary_project_ids` VARCHAR(200) DEFAULT NULL;
 
 -- 字幕行
 CREATE TABLE IF NOT EXISTS `subtitle` (
@@ -142,7 +150,6 @@ CREATE TABLE IF NOT EXISTS `glossary_term` (
   `project_id`  BIGINT      NOT NULL,
   `source_term` VARCHAR(255) NOT NULL,
   `target_term` VARCHAR(255) NOT NULL,
-  `category`    VARCHAR(40)  DEFAULT NULL,
   `note`        VARCHAR(500) DEFAULT NULL,
   `origin`      VARCHAR(10)  NOT NULL DEFAULT 'manual',
   `enabled`     TINYINT     NOT NULL DEFAULT 1,
@@ -152,6 +159,12 @@ CREATE TABLE IF NOT EXISTS `glossary_term` (
   PRIMARY KEY (`id`)
 );
 CREATE INDEX IF NOT EXISTS `idx_term_project` ON `glossary_term` (`project_id`);
+-- 2026-08 需求改版：类别是历史遗留字段，前后端一并移除（老库幂等删列）
+ALTER TABLE `glossary_term` DROP COLUMN IF EXISTS `category`;
+-- 2026-08 需求改版：来源只分 人工(manual)/自动(auto)，历史上 Agent 写的 'agent' 归并为 auto
+UPDATE `glossary_term` SET `origin` = 'auto' WHERE `origin` = 'agent';
+-- （置信度两档清理见下方 Agent 段末尾——必须等 status/confidence 列补齐后才能跑，
+--   放这里会让全新数据库首启直接崩在「Column "status" not found」）
 
 -- 文本翻译历史（AI 文本翻译模式，与视频翻译任务分开）
 CREATE TABLE IF NOT EXISTS `text_translation` (
@@ -172,10 +185,42 @@ CREATE TABLE IF NOT EXISTS `text_translation` (
   PRIMARY KEY (`id`)
 );
 CREATE INDEX IF NOT EXISTS `idx_text_user` ON `text_translation` (`user_id`, `created_at`);
+-- 2026-08 需求改版：历史来源渠道 text=文本翻译 file=文本文件 ext_text=划词 ext_page=整页 ext_image=图片翻译 ext_input=输入框翻译
+-- ext_ 前缀的记录只出现在「划词翻译」页历史，其余只出现在「文本 AI 翻译」页历史
+ALTER TABLE `text_translation` ADD COLUMN IF NOT EXISTS `channel` VARCHAR(20) NOT NULL DEFAULT 'text';
+
+-- 文档翻译任务（文档翻译模式，异步：pdf/epub/html/txt/json/docx/md/字幕）
+CREATE TABLE IF NOT EXISTS `doc_translation` (
+  `id`                    BIGINT       NOT NULL AUTO_INCREMENT,
+  `user_id`               BIGINT       NOT NULL,
+  `filename`              VARCHAR(300) NOT NULL,
+  `format`                VARCHAR(16)  NOT NULL,
+  `output_format`         VARCHAR(16)  DEFAULT NULL,
+  `target_lang`           VARCHAR(50)  NOT NULL DEFAULT '中文',
+  `style_prompt`          VARCHAR(500) DEFAULT NULL,
+  `status`                VARCHAR(16)  NOT NULL DEFAULT 'PENDING',
+  `progress`              INT          NOT NULL DEFAULT 0,
+  `total_segments`        INT          NOT NULL DEFAULT 0,
+  `done_segments`         INT          NOT NULL DEFAULT 0,
+  `error_msg`             VARCHAR(1000) DEFAULT NULL,
+  `source_path`           VARCHAR(500) DEFAULT NULL,
+  `output_path`           VARCHAR(500) DEFAULT NULL,
+  `output_name`           VARCHAR(300) DEFAULT NULL,
+  `model`                 VARCHAR(100) DEFAULT NULL,
+  `elapsed_ms`            BIGINT       NOT NULL DEFAULT 0,
+  `untranslated_segments` INT          NOT NULL DEFAULT 0,
+  `deleted`               TINYINT      NOT NULL DEFAULT 0,
+  `created_at`            DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`            DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+);
+CREATE INDEX IF NOT EXISTS `idx_doc_user` ON `doc_translation` (`user_id`, `created_at`);
+-- 2026-08 需求改版：内容预览（工作台卡片按格式渲染文档内容用），翻译完成时写入
+ALTER TABLE `doc_translation` ADD COLUMN IF NOT EXISTS `preview` VARCHAR(300) DEFAULT NULL;
 
 -- 开箱即用的演示账号 demo/demo123（BCrypt);已存在则跳过
-INSERT INTO `user` (`username`, `password`, `nickname`)
-SELECT 'demo', '$2a$10$8HTgsiGE8OFQA53QHPLWHOd6y9qpsuazM1ln/Vo/gASjP3l1qVpz2', '演示用户'
+INSERT INTO `user` (`username`, `password`, `nickname`, `role`, `enabled`)
+SELECT 'demo', '$2a$10$8HTgsiGE8OFQA53QHPLWHOd6y9qpsuazM1ln/Vo/gASjP3l1qVpz2', '演示用户', 'ADMIN', 1
 WHERE NOT EXISTS (SELECT 1 FROM `user` WHERE `username` = 'demo');
 
 -- ═══════════════════════════════════════════════════════════════════
@@ -194,6 +239,12 @@ ALTER TABLE `glossary_term` ADD COLUMN IF NOT EXISTS `vector_status` TINYINT NOT
 -- 最后一次提出/确认该词的任务：跨任务确认飞轮据此防「同一任务重试刷分」
 ALTER TABLE `glossary_term` ADD COLUMN IF NOT EXISTS `last_task_id`  BIGINT DEFAULT NULL;
 CREATE INDEX IF NOT EXISTS `idx_term_norm` ON `glossary_term` (`project_id`, `source_norm`);
+-- 2026-08 需求改版：置信度只留两档（≥0.8 入库 / 其余不留），存量的待确认/策略词条目软删。
+-- 必须放在上面的 status/confidence 加列之后（全新库先建列再清理，老库幂等）
+UPDATE `glossary_term` SET `deleted` = 1
+ WHERE `deleted` = 0 AND `origin` <> 'manual'
+   AND `status` IN ('PENDING', 'UNVERIFIED')
+   AND (`confidence` IS NULL OR `confidence` < 0.8);
 
 -- 术语桶定位：Agent 为每个「用户×领域」自动建一个 kb_project 存术语，
 -- 按 (user_id, domain_code) 查找而非按 name——用户改名不会产生重复桶并孤立术语
@@ -307,3 +358,56 @@ SELECT 0, 'game', '游戏 / 动漫', '出现游戏标题、角色名、技能名
        '优先采用官方中文版译名（如有简中/繁中版）；无官方版时采用玩家社区最广泛使用的译名；角色名音译需符合中文取名习惯；技能/道具名可意译以传达效果；日文作品注意区分官译与民间译名。',
        '官方中文名;简中版 译名;玩家社区 通用译名', '官方简中 > 官方繁中 > 社区通用 > 音译', 'builtin'
 WHERE NOT EXISTS (SELECT 1 FROM `agent_profile` WHERE `user_id` = 0 AND `domain_code` = 'game');
+
+-- ============ 2026-08 设置改版（狐译） ============
+
+-- 多服务商模型服务表：「设置 → API 配置 → 大语言模型 → 已配置的模型服务」
+-- 每行一个已保存的服务商连接；is_default=1 且 enabled=1 的那行是全局翻译当前使用的服务
+CREATE TABLE IF NOT EXISTS `model_service` (
+  `id`          BIGINT       NOT NULL AUTO_INCREMENT,
+  `user_id`     BIGINT       NOT NULL,
+  `category`    VARCHAR(16)  NOT NULL DEFAULT 'llm',
+  `provider`    VARCHAR(32)  NOT NULL,
+  `protocol`    VARCHAR(24)  NOT NULL DEFAULT 'openai',
+  `base_url`    VARCHAR(300) DEFAULT NULL,
+  `api_key`     VARCHAR(300) DEFAULT NULL,
+  `model`       VARCHAR(160) DEFAULT NULL,
+  `timeout_sec` INT          NOT NULL DEFAULT 60,
+  `enabled`     TINYINT      NOT NULL DEFAULT 1,
+  `is_default`  TINYINT      NOT NULL DEFAULT 0,
+  `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+);
+CREATE INDEX IF NOT EXISTS `idx_msvc_user` ON `model_service` (`user_id`, `category`);
+
+-- 用户头像（data URL 形式的小图，前端裁剪到 256x256 再上传）
+ALTER TABLE `user` ADD COLUMN IF NOT EXISTS `avatar` TEXT DEFAULT NULL;
+
+-- 全能AI翻译（Agent 模式）的翻译模型：独立于主/子 Agent；空=用默认大语言模型服务
+ALTER TABLE `user_setting` ADD COLUMN IF NOT EXISTS `agent_translate_base_url` VARCHAR(255) DEFAULT NULL;
+ALTER TABLE `user_setting` ADD COLUMN IF NOT EXISTS `agent_translate_api_key`  VARCHAR(255) DEFAULT NULL;
+ALTER TABLE `user_setting` ADD COLUMN IF NOT EXISTS `agent_translate_model`    VARCHAR(100) DEFAULT NULL;
+
+-- 帮助中心「反馈与建议」：本地保存，管理员后台可查看
+CREATE TABLE IF NOT EXISTS `feedback` (
+  `id`         BIGINT       NOT NULL AUTO_INCREMENT,
+  `user_id`    BIGINT       DEFAULT NULL,
+  `contact`    VARCHAR(120) DEFAULT NULL,
+  `content`    TEXT         NOT NULL,
+  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+);
+
+-- ===== 2026-08 性能改版 =====
+
+-- 每条模型服务可单独配并发（原先是启动时按环境变量焊死的全局线程池，设置页调不了）。
+-- 空/0 = 用 aifanyi.llm.concurrency 默认值。
+ALTER TABLE `model_service` ADD COLUMN IF NOT EXISTS `concurrency` INT DEFAULT NULL;
+
+-- 视频任务可携带用户自带的字幕：有它就跳过抽音频与语音识别，直接翻译
+-- （实测识别占视频翻译 90% 的耗时，自带字幕能把 140s 压到 10s 量级）。
+ALTER TABLE `translation_task` ADD COLUMN IF NOT EXISTS `subtitle_source_path` VARCHAR(500) DEFAULT NULL;
+
+-- 文档翻译的 PDF 处理档位：layout=保版式(BabelDOC) / fast=内置引擎；空=layout
+ALTER TABLE `doc_translation` ADD COLUMN IF NOT EXISTS `pdf_mode` VARCHAR(16) DEFAULT NULL;

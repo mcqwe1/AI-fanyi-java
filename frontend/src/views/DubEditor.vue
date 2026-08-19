@@ -53,7 +53,7 @@
               </el-select>
               <div class="hint">
                 {{ voices.length ? '音色由所选配音引擎提供，也可输入引擎支持的其他音色标识'
-                                 : '还没选配音引擎——先去「设置 → API 密钥 → 语音合成 TTS」选一个' }}
+                                 : '还没选配音引擎——先去「设置 → API 配置 → 语音合成（TTS）」选一个' }}
               </div>
             </el-form-item>
             <el-form-item label="语速">

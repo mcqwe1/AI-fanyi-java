@@ -58,6 +58,7 @@
           </el-radio-group>
           <span class="ops">
             <el-button size="small" icon="el-icon-document-copy" @click="copyResult">复制译文</el-button>
+            <el-button size="small" icon="el-icon-view" @click="viewInPage">网页查看</el-button>
             <el-button v-if="result.filename" size="small" type="primary" icon="el-icon-download"
                        @click="downloadTranslatedFile">下载译文文件（{{ result.format }}）</el-button>
             <el-button size="small" icon="el-icon-download" @click="exportTxt(result, 'plain')">导出译文</el-button>
@@ -81,7 +82,10 @@
       </el-card>
 
       <el-card class="panel">
-        <div slot="header">翻译历史</div>
+        <div slot="header">
+          翻译历史
+          <span class="hint">只含本页的文本 / 文本文件翻译；浏览器插件的划词、整页、图片、输入框记录在「划词翻译」页</span>
+        </div>
         <el-table :data="history" size="small" stripe>
           <el-table-column prop="id" label="ID" width="60" />
           <el-table-column label="时间" width="150">
@@ -109,6 +113,7 @@
 import http from '../api/http'
 import { LANG_GROUPS } from '../constants/langs'
 import stylePresetsMixin from '../mixins/stylePresets'
+import { openTextPage } from '../utils/textActions'
 
 export default {
   name: 'TextMode',
@@ -142,6 +147,11 @@ export default {
       const reader = new FileReader()
       reader.onload = e => { this.uploadContent = e.target.result; this.text = e.target.result }
       reader.readAsText(file.raw)
+    },
+    /** 网页查看译文：新标签页干净排版展示（2026-08 需求改版）。 */
+    viewInPage () {
+      if (!this.result) return
+      openTextPage((this.uploadName || '文本翻译') + ' · 译文', this.result.plainTarget || '')
     },
     clearUpload () {
       this.uploadRaw = null

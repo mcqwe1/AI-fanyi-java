@@ -43,4 +43,23 @@ public class AuthController {
         return R.ok(authService.changeUsername(
                 SecurityUtils.currentUserId(), req.newUsername(), req.password()));
     }
+
+    /** 上传/更换头像（data URL 小图，空串=清除）。返回保存后的头像。 */
+    public record AvatarReq(String avatar) {
+    }
+
+    @PostMapping("/avatar")
+    public R<String> updateAvatar(@RequestBody AvatarReq req) {
+        return R.ok(authService.updateAvatar(SecurityUtils.currentUserId(), req.avatar()));
+    }
+
+    /** 注销账号（需密码确认）：软删用户并清除其密钥类数据，前端随后登出。 */
+    public record DeleteAccountReq(String password) {
+    }
+
+    @PostMapping("/delete-account")
+    public R<Void> deleteAccount(@RequestBody DeleteAccountReq req) {
+        authService.deleteAccount(SecurityUtils.currentUserId(), req.password());
+        return R.ok();
+    }
 }

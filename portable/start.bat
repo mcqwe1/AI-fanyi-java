@@ -25,7 +25,7 @@ if %errorlevel%==0 (
 echo Starting aifanyi on port %AIFANYI_PORT% ... first start may take ~20s
 cd /d "%ROOT%"
 set "LOGFILE=%ROOT%data\backend-%AIFANYI_PORT%.log"
-start "aifanyi-backend" /min cmd /c ""%ROOT%runtime\bin\java.exe" -Xms128m -Xmx1024m -Dserver.address=127.0.0.1 "-DAIFANYI_PORT=%AIFANYI_PORT%" -jar "%ROOT%app\aifanyi.jar" > "%LOGFILE%" 2>&1"
+start "aifanyi-backend" /min cmd /c ""%ROOT%runtime\bin\java.exe" -Xms512m -Xmx2048m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dserver.address=127.0.0.1 "-DAIFANYI_PORT=%AIFANYI_PORT%" -jar "%ROOT%app\aifanyi.jar" > "%LOGFILE%" 2>&1"
 
 powershell -NoProfile -Command "for($i=0;$i -lt 90;$i++){try{$c=New-Object Net.Sockets.TcpClient('127.0.0.1',%AIFANYI_PORT%);$c.Close();exit 0}catch{Start-Sleep 1}};exit 1" >nul 2>nul
 if not %errorlevel%==0 (

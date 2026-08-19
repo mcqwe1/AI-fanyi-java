@@ -70,6 +70,7 @@ public class AgentPipeline {
     private final TraceRecorder trace;
     private final com.aifanyi.agent.trace.LangSmithExporter langSmith;
     private final AifanyiProperties props;
+    private final com.aifanyi.service.KbService kbService;
 
     /**
      * 由 TaskService 调用（不可自调用——@Async 自调用会绕过代理变成同步执行）。
@@ -160,8 +161,12 @@ public class AgentPipeline {
             TermBundle bundle = TermBundle.empty();
             try {
                 AgentProfile primary = profiles.get(0);
-                Long bucketId = termStateMachine.resolveBucket(uid, primary.getDomainCode(),
-                        primary.getName(), doc.sourceLang(), doc.targetLang());
+                // 入库目标：用户在提交时指定了术语库就写进去（明确的沉淀意图），
+                // 没指定才按领域自动建桶。复用 task.project_id 这一列，零 schema 改动。
+                Long bucketId = task.getProjectId() != null
+                        ? task.getProjectId()
+                        : termStateMachine.resolveBucket(uid, primary.getDomainCode(),
+                                primary.getName(), doc.sourceLang(), doc.targetLang());
                 // 回写术语桶：运行详情面板与「下次同领域视频复用术语」都靠它
                 task.setProjectId(bucketId);
                 taskMapper.updateById(task);
@@ -177,7 +182,7 @@ public class AgentPipeline {
                                 + " 条（含历史库复用）", 0, "OK", false);
                 trace.stepFull(buf, "术语落库",
                         TraceRecorder.fields("候选", scored.size() + " 条"),
-                        persistBreakdown(scored, bundle), 0, false);
+                        persistBreakdown(bundle), 0, false);
             } catch (Exception e) {
                 // 术语落库失败 → 裸翻，绝不因此丢掉整个任务
                 log.warn("术语入库失败，本次裸翻: {}", e.getMessage());
@@ -191,7 +196,15 @@ public class AgentPipeline {
 
             // ── ⑧ RAG 翻译 ──
             update(task, TaskStatus.TRANSLATING, 76, "带术语翻译");
-            LlmConfig transLlm = settings.effectiveLlm(uid);
+            // 用户勾选的术语库：明确的套用意图，覆盖同名的 Agent 产出
+            Map<String, String> extraGlossary = kbService.loadForInjection(
+                    uid, task.getGlossaryProjectIds(), null);
+            if (!extraGlossary.isEmpty()) {
+                bundle = bundle.withExtra(extraGlossary);
+                trace.record(buf, "TERMS", null, "套用术语库",
+                        "用户勾选术语 " + extraGlossary.size() + " 条并入翻译", 0, "OK", false);
+            }
+            LlmConfig transLlm = settings.effectiveAgentTranslate(uid);
             List<String> sources = doc.texts();
             long tr0 = System.currentTimeMillis();
             RagContextBuilder.RagResult rr = ragTranslator.translate(sources, doc.targetLang(),
@@ -303,17 +316,21 @@ public class AgentPipeline {
 
     // ────── LangSmith 明细渲染：人能读的清单（本地 record 只存条数摘要）──────
 
-    /** ⑤ 仲裁产物：每行一条，译法/置信度/策略/来源/冲突一眼可读。 */
+    /** ⑤ 仲裁产物：每行一条，译法/策略/来源/一致性/冲突一眼可读。 */
     private static String renderScored(List<ScoredTerm> scored) {
         if (scored.isEmpty()) {
             return "（无）";
         }
         StringBuilder sb = new StringBuilder();
         for (ScoredTerm t : scored) {
-            sb.append(t.source()).append(" → ").append(t.target())
-                    .append("｜置信 ").append(String.format("%.2f", t.confidence()));
+            sb.append(t.source()).append(" → ").append(t.target());
             if (t.strategy() != null) {
                 sb.append('｜').append(t.strategy().zh());
+            }
+            if (t.hasAuthority()) {
+                sb.append("｜权威佐证");
+            } else if (t.agreements() >= 2) {
+                sb.append("｜").append(t.agreements()).append(" 位专家一致");
             }
             if (t.profileCode() != null) {
                 sb.append('｜').append(t.profileCode());
@@ -329,22 +346,13 @@ public class AgentPipeline {
         return sb.toString().stripTrailing();
     }
 
-    /** ⑦ 落库结果：按档位列出每个词的去向（谁入库了、谁只用这一次、谁被扔了）。 */
-    private static Map<String, Object> persistBreakdown(List<ScoredTerm> scored, TermBundle bundle) {
-        Map<TermState, List<String>> tiers = new LinkedHashMap<>();
-        for (ScoredTerm t : scored) {
-            tiers.computeIfAbsent(TermStateMachine.classify(t), k -> new ArrayList<>())
-                    .add(t.source() + " → " + t.target()
-                            + "（" + String.format("%.2f", t.confidence()) + "）");
-        }
+    /** ⑦ 落库结果：状态机记下的逐词去向（谁入库启用、谁进备选、谁只用这一次）。 */
+    private static Map<String, Object> persistBreakdown(TermBundle bundle) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("本次落库", bundle.persisted() + " 条");
         out.put("参与翻译", bundle.size() + " 条（含历史库复用）");
-        for (TermState st : TermState.values()) {          // 固定档位顺序，别按遇到顺序乱排
-            List<String> rows = tiers.get(st);
-            if (rows != null) {
-                out.put(st.zh() + " " + rows.size() + " 条", String.join("\n", rows));
-            }
+        if (!bundle.ledger().isEmpty()) {
+            out.put("逐词去向", String.join("\n", bundle.ledger()));
         }
         return out;
     }

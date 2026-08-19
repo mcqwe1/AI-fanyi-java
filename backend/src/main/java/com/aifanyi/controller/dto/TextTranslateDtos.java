@@ -35,9 +35,10 @@ public class TextTranslateDtos {
     ) {
     }
 
-    /** 历史列表条目（轻量，不含正文大字段）。 */
+    /** 历史列表条目（轻量，不含正文大字段）。channel 见 TextTranslation。 */
     public record HistoryItem(
             Long id,
+            String channel,
             String targetLang,
             String preview,
             String model,

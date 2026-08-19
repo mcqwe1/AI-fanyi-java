@@ -1,5 +1,7 @@
 package com.aifanyi.security;
 
+import com.aifanyi.entity.User;
+import com.aifanyi.mapper.UserMapper;
 import io.jsonwebtoken.Claims;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -15,16 +17,16 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 
-/**
- * 解析 Authorization: Bearer <token>，校验通过后写入 SecurityContext。
- */
+/** Parses the bearer token and also checks that the account remains enabled. */
 @Component
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtUtil jwtUtil;
+    private final UserMapper userMapper;
 
-    public JwtAuthFilter(JwtUtil jwtUtil) {
+    public JwtAuthFilter(JwtUtil jwtUtil, UserMapper userMapper) {
         this.jwtUtil = jwtUtil;
+        this.userMapper = userMapper;
     }
 
     @Override
@@ -36,20 +38,18 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             Claims claims = jwtUtil.parse(token);
             if (claims != null) {
                 Long uid = claims.get("uid", Long.class);
-                String username = claims.getSubject();
-                AuthUser principal = new AuthUser(uid, username);
-                var auth = new UsernamePasswordAuthenticationToken(
-                        principal, null, AuthorityUtils.NO_AUTHORITIES);
-                SecurityContextHolder.getContext().setAuthentication(auth);
+                User user = uid == null ? null : userMapper.selectById(uid);
+                if (user != null && (user.getEnabled() == null || user.getEnabled() == 1)) {
+                    AuthUser principal = new AuthUser(uid, user.getUsername());
+                    var auth = new UsernamePasswordAuthenticationToken(
+                            principal, null, AuthorityUtils.NO_AUTHORITIES);
+                    SecurityContextHolder.getContext().setAuthentication(auth);
+                }
             }
         }
         chain.doFilter(request, response);
     }
 
-    /**
-     * 优先取 Authorization: Bearer；缺失时回退 access_token 查询参数。
-     * 后者供 &lt;video&gt;/&lt;audio&gt; 直接播放用（HTML 媒体元素无法自定义请求头）。
-     */
     private static String resolveToken(HttpServletRequest request) {
         String header = request.getHeader("Authorization");
         if (StringUtils.hasText(header) && header.startsWith("Bearer ")) {

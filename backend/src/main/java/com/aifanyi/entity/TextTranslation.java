@@ -15,6 +15,12 @@ public class TextTranslation {
 
     private Long userId;
 
+    /**
+     * 来源渠道：text=文本翻译 file=文本文件 ext_text=划词 ext_page=整页 ext_image=图片翻译 ext_input=输入框翻译。
+     * ext_ 前缀的记录归「划词翻译」页历史，其余归「文本 AI 翻译」页历史，两边互不相见。
+     */
+    private String channel;
+
     private String targetLang;
 
     /** 本次翻译风格提示词（空=未指定风格） */

@@ -29,6 +29,13 @@ public class GlobalExceptionHandler {
         return R.fail(400, msg);
     }
 
+    /** 不存在的接口路径（含已下线的旧接口）：如实返回 404，别伪装成系统异常。 */
+    @ExceptionHandler(org.springframework.web.servlet.resource.NoResourceFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public R<Void> handleNotFound(org.springframework.web.servlet.resource.NoResourceFoundException e) {
+        return R.fail(404, "接口不存在: " + e.getResourcePath());
+    }
+
     @ExceptionHandler(Exception.class)
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     public R<Void> handleOther(Exception e) {

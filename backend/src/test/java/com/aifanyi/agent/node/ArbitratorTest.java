@@ -8,7 +8,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Arbitrator 与 TermStateMachine.classify 的纯函数单测。
+ * Arbitrator 去重仲裁的纯函数单测（分诊规则见 TermTriageTest）。
  * 去重的确定性尤其重要——同一批输入每次跑出不同术语表会让用户彻底失去信任。
  */
 class ArbitratorTest {
@@ -122,74 +122,44 @@ class ArbitratorTest {
         assertTrue(arbitrator.arbitrate(List.of(result("it", List.of())), List.of("it")).isEmpty());
     }
 
-    /** 结果按置信度降序。 */
+    /** 结果按证据强度降序：有权威佐证的排前面（旧版按置信度分数排，分数已删）。 */
     @Test
-    void sortsByConfidenceDesc() {
+    void sortsByEvidenceStrengthDesc() {
         List<ScoredTerm> out = arbitrator.arbitrate(List.of(
                 result("it", List.of(
-                        draftAuth("CRISPR", "CRISPR", "it", "https://nih.gov/"),
-                        draft("thing", "东西", "it")))),
+                        draft("thing", "东西", "it"),
+                        draftAuth("CRISPR", "CRISPR", "it", "https://nih.gov/")))),
                 List.of("it"));
         assertEquals(2, out.size());
-        assertTrue(out.get(0).confidence() >= out.get(1).confidence());
+        assertTrue(out.get(0).hasAuthority(), "有权威佐证的应排在前");
+        assertFalse(out.get(1).hasAuthority());
     }
 
-    // ─────────── ⑦ 分档 ───────────
-
-    private static ScoredTerm scored(double conf, Strategy st) {
-        return ScoredTerm.builder().source("X").sourceNorm("x").target("Y")
-                .strategy(st).build().withConfidence(conf);
-    }
-
-    @Test
-    void classifyThresholds() {
-        assertEquals(TermState.VERIFIED, TermStateMachine.classify(scored(0.90, null)));
-        assertEquals(TermState.VERIFIED, TermStateMachine.classify(scored(0.85, null)));
-        assertEquals(TermState.PENDING, TermStateMachine.classify(scored(0.84, null)));
-        assertEquals(TermState.PENDING, TermStateMachine.classify(scored(0.60, null)));
-        assertEquals(TermState.EPHEMERAL, TermStateMachine.classify(scored(0.59, null)));
-        assertEquals(TermState.EPHEMERAL, TermStateMachine.classify(scored(0.40, null)));
-        assertEquals(TermState.DISCARD, TermStateMachine.classify(scored(0.39, null)));
-        assertEquals(TermState.DISCARD, TermStateMachine.classify(scored(0.0, null)));
-    }
-
-    /**
-     * <b>策略词优先规则</b>：分数落在「仅本次」档的策略词仍要入库锁一致性。
-     * 这是对架构图自相矛盾之处的裁定。
-     */
-    @Test
-    void coinedStrategyOverridesEphemeral() {
-        ScoredTerm coined = scored(0.45, Strategy.TRANSLITERATE);
-        assertEquals(TermState.UNVERIFIED, TermStateMachine.classify(coined),
-                "音译词即使 0.45 分也要入库，锁定全篇一致性");
-        assertTrue(TermStateMachine.classify(coined).persistent());
-
-        // 而非策略词的同分数条目仍是 EPHEMERAL（不落库）
-        assertEquals(TermState.EPHEMERAL, TermStateMachine.classify(scored(0.45, null)));
-    }
-
-    /** 权威译名不算「策略词」，走正常分档。 */
-    @Test
-    void authoritativeIsNotCoined() {
-        assertEquals(TermState.EPHEMERAL,
-                TermStateMachine.classify(scored(0.45, Strategy.AUTHORITATIVE)));
-    }
-
-    /** 低于丢弃线的策略词也要丢——一致性价值不能凌驾于「这词可能根本不该收录」之上。 */
-    @Test
-    void coinedBelowDiscardThresholdStillDiscarded() {
-        assertEquals(TermState.DISCARD, TermStateMachine.classify(scored(0.30, Strategy.COINAGE)));
-    }
+    // ─────────── ⑦ 去向标志位 ───────────
 
     @Test
     void stateFlags() {
-        assertTrue(TermState.VERIFIED.persistent());
-        assertTrue(TermState.PENDING.persistent());
-        assertTrue(TermState.UNVERIFIED.persistent());
-        assertFalse(TermState.EPHEMERAL.persistent(), "EPHEMERAL 绝不落库");
+        assertTrue(TermState.ACTIVE.persistent());
+        assertTrue(TermState.CANDIDATE.persistent(), "备选词也要入库（只是不启用）");
+        assertFalse(TermState.EPHEMERAL.persistent(), "仅本次使用的绝不落库");
         assertFalse(TermState.DISCARD.persistent());
 
-        assertTrue(TermState.EPHEMERAL.usableNow(), "但本次翻译要用");
+        assertEquals(1, TermState.ACTIVE.enabledFlag());
+        assertEquals(0, TermState.CANDIDATE.enabledFlag(), "备选词落库时必须 enabled=0");
+
+        assertTrue(TermState.CANDIDATE.usableNow(), "备选词仍参与本次翻译，保证本片内一致");
+        assertTrue(TermState.EPHEMERAL.usableNow());
         assertFalse(TermState.DISCARD.usableNow());
+    }
+
+    /** 库里存量行的旧 status 字符串必须能读回来（不做数据迁移）。 */
+    @Test
+    void parsesLegacyStateNames() {
+        assertEquals(TermState.ACTIVE, TermState.parse("VERIFIED"));
+        assertEquals(TermState.CANDIDATE, TermState.parse("PENDING"));
+        assertEquals(TermState.CANDIDATE, TermState.parse("UNVERIFIED"));
+        assertEquals(TermState.ACTIVE, TermState.parse("active"));
+        assertNull(TermState.parse(null));
+        assertEquals(TermState.CANDIDATE, TermState.parse("不认得"), "认不出的一律当备选");
     }
 }

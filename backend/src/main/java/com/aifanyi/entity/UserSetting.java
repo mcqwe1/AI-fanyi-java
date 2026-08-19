@@ -23,9 +23,6 @@ public class UserSetting {
     private String llmModel;
     private String dashscopeApiKey;
     private String zhipuApiKey;
-    private String geminiBaseUrl;
-    private String geminiApiKey;
-    private String geminiModel;
 
     /** TTS 配音引擎：edge / siliconflow / openai（见 TtsEngines；空=未选择） */
     private String ttsProvider;
@@ -37,10 +34,13 @@ public class UserSetting {
 
     /** 默认翻译风格提示词（三个翻译模式默认带出，任务可临时覆盖；空=无默认风格） */
     private String stylePrompt;
-    /** 自定义术语抽取提示词（KB 模式；空=用内置。支持 {sourceLang}/{targetLang}/{transcript} 占位符） */
-    private String termExtractPrompt;
 
     // ---- Agent 模式（实验功能）----
+    /** 全能AI翻译的翻译模型：空=用默认大语言模型服务 */
+    private String agentTranslateBaseUrl;
+    private String agentTranslateApiKey;
+    private String agentTranslateModel;
+
     /** 主 Agent（场景推测/仲裁）模型配置：判断力要求高，可配强模型 */
     private String agentMainBaseUrl;
     private String agentMainApiKey;

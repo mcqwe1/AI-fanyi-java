@@ -28,9 +28,11 @@ public class SecurityConfig {
         http
                 .csrf(AbstractHttpConfigurer::disable)
                 .cors(cors -> {})
+                // 默认 X-Frame-Options: DENY 会拦截同源 iframe——对照页要内嵌 /api/doc/{id}/file
+                .headers(h -> h.frameOptions(f -> f.sameOrigin()))
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/api/auth/**", "/error").permitAll()
+                        .requestMatchers("/api/auth/**", "/api/feedback", "/error").permitAll()
                         // API 一律鉴权;其余（内嵌前端静态资源 / index.html / assets）放行
                         .requestMatchers("/api/**").authenticated()
                         .anyRequest().permitAll()

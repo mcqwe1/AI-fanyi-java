@@ -40,8 +40,8 @@
     <div v-if="step === 2" class="step-body done">
       <i class="el-icon-success big" />
       <p style="font-size:15px">配置完成！回到首页上传一个视频或音频试试吧。</p>
-      <p class="tip">密钥随时可在「设置 → API 密钥」里修改；更多说明见
-        <a @click.prevent="goGuide" href="#">使用教程</a>。</p>
+      <p class="tip">密钥随时可在「设置 → API 配置」里修改；更多说明见
+        <a @click.prevent="goGuide" href="#">帮助中心</a>。</p>
     </div>
 
     <div slot="footer" class="footer">
@@ -88,15 +88,22 @@ export default {
     async save () {
       this.saving = true
       try {
-        const body = {}
-        if (this.groqApiKey.trim()) body.groqApiKey = this.groqApiKey.trim()
-        if (this.llmApiKey.trim()) {
-          body.llmApiKey = this.llmApiKey.trim()
-          body.llmBaseUrl = this.llmBaseUrl.trim() || 'https://api.deepseek.com'
-          body.llmModel = this.llmModel.trim() || 'deepseek-chat'
+        if (this.groqApiKey.trim()) {
+          await http.put('/settings', { groqApiKey: this.groqApiKey.trim() })
         }
-        if (Object.keys(body).length) {
-          await http.put('/settings', body)
+        if (this.llmApiKey.trim()) {
+          // 走新的模型服务接口：保存为一条服务并设为默认（Base URL 会自动补 /v1）
+          const base = (this.llmBaseUrl.trim() || 'https://api.deepseek.com').toLowerCase()
+          await http.post('/settings/llm/services', {
+            provider: base.includes('deepseek') ? 'deepseek' : 'custom-openai',
+            baseUrl: this.llmBaseUrl.trim() || 'https://api.deepseek.com',
+            apiKey: this.llmApiKey.trim(),
+            model: this.llmModel.trim() || 'deepseek-chat',
+            timeoutSec: 60,
+            makeDefault: true
+          })
+        }
+        if (this.groqApiKey.trim() || this.llmApiKey.trim()) {
           this.$message.success('密钥已保存')
         }
         this.step = 2
@@ -112,7 +119,8 @@ export default {
     },
     goGuide () {
       this.close()
-      this.$router.push('/guide')
+      const base = location.href.split('#')[0]
+      window.open(base + '#/help', '_blank')
     }
   }
 }

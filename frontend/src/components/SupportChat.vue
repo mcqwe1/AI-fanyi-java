@@ -63,7 +63,7 @@ export default {
       loading: false,
       msgs: [WELCOME],
       quickQuestions: [
-        '怎么配置 API 密钥？',
+        '怎么配置模型服务？',
         '五种翻译模式有什么区别？',
         '全能AI翻译怎么用？',
         '译文里有几行没翻译怎么办？'

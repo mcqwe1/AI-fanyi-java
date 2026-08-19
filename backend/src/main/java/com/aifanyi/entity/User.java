@@ -14,10 +14,19 @@ public class User {
 
     private String username;
 
-    /** BCrypt 哈希后的密码 */
+    /** BCrypt hashed password. */
     private String password;
 
     private String nickname;
+
+    /** 头像（data URL 小图；null=用默认 logo） */
+    private String avatar;
+
+    /** USER / ADMIN. */
+    private String role;
+
+    /** 1 means the account is allowed to sign in; 0 means disabled. */
+    private Integer enabled;
 
     @TableLogic
     private Integer deleted;

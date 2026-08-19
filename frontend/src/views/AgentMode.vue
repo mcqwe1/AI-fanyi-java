@@ -55,6 +55,20 @@
             <el-form-item v-if="needsAsr">
               <el-checkbox v-model="bilingual">双语字幕</el-checkbox>
             </el-form-item>
+            <el-form-item label="套用术语库">
+              <GlossaryPicker v-model="glossaryIds" />
+              <div class="tip">选中术语库中的术语将套用到本次翻译</div>
+            </el-form-item>
+            <el-form-item label="新词存入">
+              <el-select v-model="termProjectId" style="width:100%" placeholder="按内容领域自动归类">
+                <el-option label="按内容领域自动归类（推荐）" :value="null" />
+                <el-option v-for="p in termProjects" :key="p.id"
+                           :label="p.name + '（' + p.termCount + ' 条）'" :value="p.id" />
+              </el-select>
+              <div class="tip">
+                本次抽出的新术语存到哪个库。做系列内容时选同一个库，人名/招式/专业词全系列统一。
+              </div>
+            </el-form-item>
             <el-form-item label="翻译风格">
               <el-switch v-model="styleEnabled" />
               <template v-if="styleEnabled">
@@ -134,22 +148,16 @@
               <el-tab-pane :label="'术语' + (detail.terms && detail.terms.length ? '（' + detail.terms.length + '）' : '')" name="terms">
                 <el-table v-if="detail.terms && detail.terms.length" :data="detail.terms"
                           size="mini" stripe max-height="380">
-                  <el-table-column prop="sourceTerm" label="原文" width="120" show-overflow-tooltip />
-                  <el-table-column prop="targetTerm" label="译法" width="120" show-overflow-tooltip />
-                  <el-table-column label="可信度" width="110">
-                    <template slot-scope="{ row }">
-                      <el-tag size="mini" :type="confType(row.status)" effect="plain">{{ confText(row.status) }}</el-tag>
-                      <span class="score">{{ fmtScore(row.confidence) }}</span>
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="依据" show-overflow-tooltip>
+                  <el-table-column prop="sourceTerm" label="原文" width="140" show-overflow-tooltip />
+                  <el-table-column prop="targetTerm" label="译法" width="140" show-overflow-tooltip />
+                  <el-table-column label="说明" show-overflow-tooltip>
                     <template slot-scope="{ row }"><span>{{ row.note || row.evidence || '—' }}</span></template>
                   </el-table-column>
                 </el-table>
                 <el-empty v-else description="暂无术语" :image-size="60" />
                 <div class="tip">
-                  已确认=可放心套用；待确认=建议你过一眼；本次临时=仅这次翻译用，不进术语库。
-                  在「术语库」页改过的条目会被锁定，之后不再被自动覆盖。
+                  可信度达标的术语已自动入库并在翻译中套用，其余仅本次使用、不进术语库。
+                  到「术语库」页可随时修改，你改过的条目之后不会再被自动覆盖。
                 </div>
               </el-tab-pane>
             </el-tabs>
@@ -171,14 +179,25 @@
               <span v-if="row.status === 'FAILED'" class="errmsg">{{ row.errorMsg }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="380">
+          <el-table-column label="操作" width="440">
             <template slot-scope="{ row }">
               <el-button v-if="row.status === 'DONE' && row.mediaType !== 'TEXT'" type="text"
                          icon="el-icon-edit-outline" @click="$router.push(`/editor/${row.id}`)">编辑字幕</el-button>
-              <el-button v-if="row.status === 'DONE' && row.mediaType !== 'TEXT'" type="text"
-                         @click="download(row.id)">下载SRT</el-button>
-              <el-button v-if="row.status === 'DONE'" type="text" @click="downloadTxt(row.id)">下载译文</el-button>
-              <el-button v-if="isFinal(row.status)" type="text" @click="retry(row)">重试</el-button>
+              <el-button v-if="row.status === 'DONE'" type="text" @click="openCompare(row)">双语对照</el-button>
+              <el-button v-if="row.status === 'DONE'" type="text" @click="copyResult(row)">复制译文</el-button>
+              <el-dropdown v-if="row.status === 'DONE'" trigger="click" class="more-dd"
+                           @command="cmd => onTextCmd(cmd, row)">
+                <el-button type="text">更多<i class="el-icon-arrow-down el-icon--right" /></el-button>
+                <el-dropdown-menu slot="dropdown">
+                  <el-dropdown-item command="view">网页查看译文</el-dropdown-item>
+                  <el-dropdown-item command="exportPlain">导出译文</el-dropdown-item>
+                  <el-dropdown-item command="exportPair">导出对照</el-dropdown-item>
+                  <el-dropdown-item v-if="row.mediaType !== 'TEXT'" command="srt" divided>下载SRT</el-dropdown-item>
+                </el-dropdown-menu>
+              </el-dropdown>
+              <el-button v-if="isFinal(row.status)" type="text" @click="retry(row)">
+                {{ row.status === 'DONE' ? '重译' : '重试' }}
+              </el-button>
               <el-button type="text" class="del" @click="remove(row)">删除</el-button>
             </template>
           </el-table-column>
@@ -186,6 +205,21 @@
         <el-empty v-if="!agentTasks.length" description="还没有任务，从左边上传一个文件试试" :image-size="80" />
       </el-card>
     </div>
+
+    <!-- 双语对照弹窗 -->
+    <el-dialog title="双语对照" :visible.sync="compareVisible" width="760px" top="6vh">
+      <div v-loading="pairLoading" class="pair-box">
+        <div v-for="(p, i) in pairRows" :key="i" class="pair-row">
+          <div class="pair-src">{{ p.source }}</div>
+          <div class="pair-tgt">{{ p.target }}</div>
+        </div>
+        <el-empty v-if="!pairLoading && !pairRows.length" description="暂无对照数据" :image-size="60" />
+      </div>
+      <span slot="footer">
+        <el-button size="small" @click="exportPairs('pair')">导出对照</el-button>
+        <el-button size="small" type="primary" @click="compareVisible = false">关闭</el-button>
+      </span>
+    </el-dialog>
 
     <!-- 我的专家 -->
     <el-dialog title="我的领域专家" :visible.sync="expertsVisible" width="720px">
@@ -258,8 +292,10 @@
 import http from '../api/http'
 import stylePresetsMixin from '../mixins/stylePresets'
 import taskOps from '../mixins/taskOps'
+import GlossaryPicker from '../components/GlossaryPicker.vue'
 import { statusText, isFinal, tagType } from '../constants/status'
 import { blobDown } from '../utils/download'
+import { copyText, openTextPage, downloadText, pairsToPlain, pairsToCompare } from '../utils/textActions'
 
 /** 领域档案 code → 中文名（与后端内置档案种子一致；自建档案直接显示 name） */
 const DOMAIN_TEXT = {
@@ -276,11 +312,10 @@ const NODE_FEED = {
   TRANSLATE: { icon: '✍️', title: '带术语翻译' },
   PIPELINE: { icon: '⚙️', title: '流程' }
 }
-/** 术语状态 → 人话 */
-const CONF_TEXT = { VERIFIED: '已确认', PENDING: '待确认', UNVERIFIED: '策略词', EPHEMERAL: '本次临时' }
 
 export default {
   name: 'AgentMode',
+  components: { GlossaryPicker },
   mixins: [stylePresetsMixin, taskOps],
   data () {
     return {
@@ -292,11 +327,19 @@ export default {
       sourceLang: 'auto',
       targetLang: '中文',
       bilingual: false,
+      glossaryIds: [0],
+      termProjectId: null,                 // 新词入库目标；null = 按领域自动建桶
+      termProjects: [],
       submitting: false,
       current: null,
       detail: {},
       tab: 'feed',
-      seenSeq: 0,             // 已看过的最大 trace 序号，新条目做入场动画
+      seenSeq: 0,                          // 已看过的最大 trace 序号，新条目做入场动画
+      // 双语对照弹窗
+      compareVisible: false,
+      pairLoading: false,
+      pairRows: [],
+      pairTask: null,
       // 我的专家
       expertsVisible: false,
       experts: [],
@@ -334,11 +377,16 @@ export default {
   },
   mounted () {
     this.fetchTasks()
+    this.loadTermProjects()
     this.timer = setInterval(this.fetchTasks, 2000)
   },
   beforeDestroy () { clearInterval(this.timer) },
   methods: {
     statusText, isFinal, tagType,
+    /** 「新词存入」的候选库；拉不到只剩「自动归类」，不阻塞提交 */
+    loadTermProjects () {
+      http.get('/kb/projects').then(r => { this.termProjects = r.data || [] }).catch(() => {})
+    },
     feedTitle (t, meta) {
       // SUBAGENT 的 input 里带着 extract/resolve 前缀，转成人话
       if (t.node === 'SUBAGENT') {
@@ -349,9 +397,41 @@ export default {
       if (t.node === 'SEARCH') return '联网查「' + (t.inputDigest || '') + '」'
       return meta.title
     },
-    confText (s) { return CONF_TEXT[s] || s || '—' },
-    confType (s) { return s === 'VERIFIED' ? 'success' : (s === 'PENDING' ? 'warning' : 'info') },
-    fmtScore (v) { return (v === null || v === undefined) ? '' : Number(v).toFixed(2) },
+    /** 结果的文本操作（2026-08 需求改版）：复用文本AI翻译的交互，数据来自字幕表。 */
+    async loadPairs (row) {
+      const r = await http.get(`/tasks/${row.id}/subtitles`)
+      return (r.data || []).map(s => ({ source: s.sourceText || '', target: s.targetText || '' }))
+    },
+    async openCompare (row) {
+      this.compareVisible = true
+      this.pairLoading = true
+      this.pairTask = row
+      try {
+        this.pairRows = await this.loadPairs(row)
+      } catch (e) { this.pairRows = [] } finally { this.pairLoading = false }
+    },
+    async copyResult (row) {
+      try {
+        const pairs = await this.loadPairs(row)
+        const ok = await copyText(pairsToPlain(pairs))
+        ok ? this.$message.success('译文已复制') : this.$message.error('复制失败，请手动选择复制')
+      } catch (e) { /* 拦截器已提示 */ }
+    },
+    async onTextCmd (cmd, row) {
+      if (cmd === 'srt') return this.download(row.id)
+      try {
+        const pairs = await this.loadPairs(row)
+        const name = (row.originalFilename || ('任务' + row.id)).replace(/\.[^.]+$/, '')
+        if (cmd === 'view') openTextPage(`${name} · 译文`, pairsToPlain(pairs))
+        else if (cmd === 'exportPlain') downloadText(`${name}-译文.txt`, pairsToPlain(pairs))
+        else if (cmd === 'exportPair') downloadText(`${name}-对照.txt`, pairsToCompare(pairs))
+      } catch (e) { /* 拦截器已提示 */ }
+    },
+    exportPairs () {
+      const row = this.pairTask
+      const name = row ? (row.originalFilename || ('任务' + row.id)).replace(/\.[^.]+$/, '') : '译文'
+      downloadText(`${name}-对照.txt`, pairsToCompare(this.pairRows))
+    },
     fmtMs (ms) {
       if (!ms) return ''
       return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms'
@@ -386,6 +466,10 @@ export default {
         fd.append('asrProvider', this.asrProvider)
         fd.append('bilingual', this.bilingual)
         fd.append('stylePrompt', this.styleEnabled ? this.stylePrompt.trim() : '')
+        const gids = this.glossaryIds.filter(x => x !== 0)
+        if (gids.length) fd.append('glossaryProjectIds', gids.join(','))
+        // 新词入库目标；不传后端就按内容领域自动建桶
+        if (this.termProjectId) fd.append('projectId', this.termProjectId)
         const r = await http.post('/tasks', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
         this.$message.success('任务已提交')
         this.rawFile = null
@@ -393,6 +477,7 @@ export default {
         this.seenSeq = 0
         this.tab = 'feed'
         await this.fetchTasks()
+        this.loadTermProjects()          // 新建的自动桶要能立刻出现在下拉里
         const id = r.data && (r.data.taskId || r.data.id)
         const created = this.agentTasks.find(t => t.id === id)
         if (created) this.onSelect(created)
@@ -431,7 +516,6 @@ export default {
       }).catch(() => {})
     },
     download (id) { blobDown(`/tasks/${id}/srt`, `subtitle-${id}.srt`) },
-    downloadTxt (id) { blobDown(`/tasks/${id}/txt`, `translation-${id}.txt`) },
     retry (row) { this.retryTask(row, this.fetchTasks) },
     remove (row) {
       this.removeTask(row, () => {
@@ -529,4 +613,9 @@ export default {
 .dots i:nth-child(2) { animation-delay: .2s; }
 .dots i:nth-child(3) { animation-delay: .4s; }
 @keyframes blink { 0%, 80%, 100% { opacity: 0; } 40% { opacity: 1; } }
+.more-dd { margin: 0 10px; }
+.pair-box { max-height: 62vh; overflow-y: auto; }
+.pair-row { padding: 8px 10px; border-bottom: 1px dashed #eef1f6; }
+.pair-src { color: #8a94a6; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.pair-tgt { color: #26303e; font-size: 14px; line-height: 1.8; white-space: pre-wrap; word-break: break-word; }
 </style>

@@ -33,6 +33,12 @@ public record TermDraft(String source, String target, boolean needSearch, String
                 strategy, evidence, authorityUrl, reason, n, profileCode);
     }
 
+    /** 步骤 A 解析出的初步策略（步骤 C 若跑到会再覆盖一次）。 */
+    public TermDraft withStrategy(Strategy s) {
+        return new TermDraft(source, target, needSearch, selfReport, queries,
+                s, evidence, authorityUrl, reason, occurrences, profileCode);
+    }
+
     /** 步骤 C 的精炼结果覆盖上来（保留 A 步骤已算好的 occurrences）。 */
     public TermDraft resolved(String newTarget, Strategy st, String ev, String url, String rsn,
                               String newSelfReport) {
@@ -40,7 +46,8 @@ public record TermDraft(String source, String target, boolean needSearch, String
                 newTarget == null || newTarget.isBlank() ? target : newTarget,
                 needSearch,
                 newSelfReport == null || newSelfReport.isBlank() ? selfReport : newSelfReport,
-                queries, st, ev, url, rsn, occurrences, profileCode);
+                // 步骤 C 没给策略就保留步骤 A 的：无脑覆盖会在模型漏字段时把已有信息抹成 null
+                queries, st == null ? strategy : st, ev, url, rsn, occurrences, profileCode);
     }
 
     /**
