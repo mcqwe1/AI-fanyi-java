@@ -1,0 +1,6 @@
+# 仓库在 Windows 上维护(core.autocrlf 会把 LF 换成 CRLF),但下面这些文件要在
+# Linux 容器里执行。带 CRLF 的 shell 脚本内核读 shebang 时会把 \r 也算进解释器路径,
+# 报 "not found" 这种极难排查的错。统一锁 LF。
+*.sh text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf

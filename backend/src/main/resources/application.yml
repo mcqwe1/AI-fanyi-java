@@ -1,6 +1,8 @@
 server:
   # 便携版:start.bat 可用 AIFANYI_PORT 覆盖,避免与目标机器上其他服务冲突
-  port: ${AIFANYI_PORT:8080}
+  # PaaS(Railway/Render 等)只注入 PORT,不认 AIFANYI_PORT——放在第二顺位兜底,
+  # 便携版行为不变(AIFANYI_PORT 一旦设置仍然优先)
+  port: ${AIFANYI_PORT:${PORT:8080}}
   tomcat:
     # 拒收超大请求体时不直接 RST 连接（否则前端只看到 ERR_CONNECTION_RESET）
     max-swallow-size: -1

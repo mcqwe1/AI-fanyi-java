@@ -1,0 +1,38 @@
+# 构建上下文瘦身。本地这些目录合计 20GB+(dist 11G、ai-service 8.1G),
+# 不排除的话 docker build 光传上下文就要几十分钟。
+# Railway 从 git 检出构建,本来就看不到被 gitignore 的东西;此文件主要保障本地构建一致。
+
+# 便携分发产物与运行时(内置 JRE / Python / Whisper 模型)
+dist/
+portable/
+ai-service/
+
+# 本地测试素材与临时产物
+Video-text-test/
+tmp-e2e/
+tmp-probe/
+
+# 构建产物:前端由阶段 1 现编译,后端由阶段 2 现编译,都不该从上下文带入
+frontend/node_modules/
+frontend/dist/
+backend/target/
+backend/src/main/resources/static/
+
+# 运行期数据,绝不能进镜像
+backend/data/
+data/
+*.log
+
+# 与镜像无关
+.git/
+.github/
+.idea/
+.vscode/
+.claude/
+docs/
+extension/
+scripts/
+*.ps1
+*.bat
+*.bak
+README.md
