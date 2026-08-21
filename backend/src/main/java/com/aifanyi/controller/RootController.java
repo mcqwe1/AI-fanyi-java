@@ -1,3 +1,4 @@
+
 package com.aifanyi.controller;
 
 import com.aifanyi.common.R;
@@ -21,4 +22,5 @@ public class RootController {
         return R.ok(authService.login(req));
     }
 }
+
 
